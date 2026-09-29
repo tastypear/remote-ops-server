@@ -57,7 +57,7 @@ Request body: `{cmd, args, shell, cwd, env, timeout, stdin, binary}`. `shell:tru
 
 Server guarantees: process registry (every PID tracked, kill/stdin verify ownership), env sanitization (secrets like the auth token stripped from child env), timeout enforced on both sync and stream endpoints, SSE keepalive defeats proxy idle timeouts, orphan cleanup on client disconnect.
 
-**`/ws/exec`** covers two edge cases SSE can't: true streaming stdin (write → read → write, interactive) and binary-safe stdout/stderr. Auth via `Authorization: Bearer <token>` header (preferred) or `?token=` query param. JSON message protocol — see `ws_exec` docstring in `server.py` for the full frame reference.
+**`/ws/exec`** covers two edge cases SSE can't: true streaming stdin (write → read → write, interactive) and binary-safe stdout/stderr. Auth via `Authorization: Bearer <token>` header (preferred) or `?token=` query param. JSON message protocol — see `ws_exec` docstring in `server.py` for the full frame reference. PTY mode (`{pty:true, cols, rows}` in the start message) spawns the child with a pseudo-terminal — echo, line editing, terminal control, and `resize` events work. Output is merged (stdout+stderr on one stream, as with any PTY).
 
 ### File Descriptors (stateful fd session)
 

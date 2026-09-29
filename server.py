@@ -14,6 +14,11 @@ import platform
 import shutil
 import socket
 import stat
+import struct
+import fcntl
+import termios
+import pty
+import errno
 import signal as signal_module
 import sys
 import time
@@ -898,6 +903,12 @@ def _ws_auth(ws: WebSocket) -> bool:
 _ws_connections: int = 0   # active /ws/exec sessions (bounded by WS_MAX_CONN)
 
 
+def _pty_set_winsize(fd: int, rows: int, cols: int) -> None:
+    """Set the PTY window size (TIOCSWINSZ ioctl)."""
+    winsize = struct.pack("HHHH", rows, cols, 0, 0)
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
+
+
 @app.websocket("/ws/exec")
 async def ws_exec(ws: WebSocket):
     global _ws_connections
@@ -927,8 +938,31 @@ async def ws_exec(ws: WebSocket):
         known = ExecRequest.model_fields
         req = ExecRequest(**{k: v for k, v in msg.items() if k in known})
 
+        use_pty = bool(msg.get("pty"))
+        master_fd = None
+
         try:
-            proc = await _spawn(req)
+            if use_pty:
+                master_fd, slave_fd = pty.openpty()
+                _pty_set_winsize(master_fd, int(msg.get("rows", 24)), int(msg.get("cols", 80)))
+                env = _build_env(req.env)
+                env.setdefault("TERM", "xterm-256color")
+                cwd = _safe_cwd(req.cwd)
+                if req.shell:
+                    proc = await asyncio.create_subprocess_shell(
+                        req.cmd, stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
+                        cwd=cwd, env=env, start_new_session=True,
+                    )
+                else:
+                    argv = [req.cmd] + list(req.args)
+                    proc = await asyncio.create_subprocess_exec(
+                        *argv, stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
+                        cwd=cwd, env=env, start_new_session=True,
+                    )
+                os.close(slave_fd)
+                _proc_register(proc, req.cmd)
+            else:
+                proc = await _spawn(req)
         except FileNotFoundError:
             await ws.send_json({"type": "error", "data": f"command not found: {req.cmd}"})
             await ws.send_json({"type": "exit", "code": -2, "signal": None, "duration_ms": 0})
@@ -949,11 +983,17 @@ async def ws_exec(ws: WebSocket):
 
         # One-shot initial stdin (no EOF — streaming stdin may follow).
         if req.stdin:
-            try:
-                proc.stdin.write(req.stdin.encode())
-                await proc.stdin.drain()
-            except (BrokenPipeError, RuntimeError):
-                pass
+            if use_pty:
+                try:
+                    os.write(master_fd, req.stdin.encode())
+                except OSError:
+                    pass
+            else:
+                try:
+                    proc.stdin.write(req.stdin.encode())
+                    await proc.stdin.drain()
+                except (BrokenPipeError, RuntimeError):
+                    pass
 
         async def reader(stream, stream_type):
             try:
@@ -972,11 +1012,42 @@ async def ws_exec(ws: WebSocket):
             finally:
                 await queue.put(None)
 
-        t1 = asyncio.create_task(reader(proc.stdout, "stdout"))
-        t2 = asyncio.create_task(reader(proc.stderr, "stderr"))
+        if use_pty:
+            async def pty_reader():
+                loop = asyncio.get_event_loop()
+                try:
+                    while True:
+                        try:
+                            chunk = await loop.run_in_executor(None, os.read, master_fd, CHUNK_SIZE)
+                        except OSError as e:
+                            # EIO on the master fd means the child exited (slave
+                            # closed) — treat as EOF, not an error.
+                            if e.errno == errno.EIO:
+                                break
+                            raise
+                        if not chunk:
+                            break
+                        try:
+                            text = chunk.decode("utf-8")
+                            await queue.put({"type": "stdout", "data": text, "encoding": "utf8"})
+                        except UnicodeDecodeError:
+                            b64 = base64.b64encode(chunk).decode("ascii")
+                            await queue.put({"type": "stdout", "data": b64, "encoding": "base64"})
+                except Exception as e:
+                    await queue.put({"type": "error", "data": str(e)})
+                finally:
+                    await queue.put(None)
+            reader_tasks = [asyncio.create_task(pty_reader())]
+            num_readers = 1
+        else:
+            reader_tasks = [
+                asyncio.create_task(reader(proc.stdout, "stdout")),
+                asyncio.create_task(reader(proc.stderr, "stderr")),
+            ]
+            num_readers = 2
 
         async def stdin_writer():
-            """Receive client messages and write to proc.stdin / kill."""
+            """Receive client messages and write to proc.stdin / master_fd / kill."""
             try:
                 while True:
                     raw = await ws.receive_text()
@@ -988,21 +1059,34 @@ async def ws_exec(ws: WebSocket):
                             data = base64.b64decode(data)
                         else:
                             data = data.encode("utf-8")
-                        try:
-                            proc.stdin.write(data)
-                            await proc.stdin.drain()
-                        except (BrokenPipeError, RuntimeError):
-                            pass
+                        if use_pty:
+                            try:
+                                os.write(master_fd, data)
+                            except OSError:
+                                pass
+                        else:
+                            try:
+                                proc.stdin.write(data)
+                                await proc.stdin.drain()
+                            except (BrokenPipeError, RuntimeError):
+                                pass
                         _proc_touch(pid)
                     elif t == "stdin_close":
-                        try:
-                            proc.stdin.close()
-                        except Exception:
-                            pass
-                        # Do NOT return — keep receiving so kill after EOF works.
+                        if not use_pty:
+                            try:
+                                proc.stdin.close()
+                            except Exception:
+                                pass
+                        # PTY: closing the master kills the session; just ignore.
                     elif t == "kill":
                         sig = getattr(signal_module, m.get("signal", "SIGTERM"), signal_module.SIGTERM)
                         _kill_proc(proc, sig)
+                    elif t == "resize":
+                        if use_pty:
+                            try:
+                                _pty_set_winsize(master_fd, int(m.get("rows", 24)), int(m.get("cols", 80)))
+                            except Exception:
+                                pass
             except WebSocketDisconnect:
                 _kill_proc(proc)
             except Exception:
@@ -1013,7 +1097,7 @@ async def ws_exec(ws: WebSocket):
         timed_out = False
         done = 0
         try:
-            while done < 2:
+            while done < num_readers:
                 remaining = None
                 if deadline is not None:
                     remaining = deadline - time.monotonic()
@@ -1038,16 +1122,21 @@ async def ws_exec(ws: WebSocket):
             stdin_task.cancel()
             if timed_out:
                 _kill_proc(proc)
-            await asyncio.gather(t1, t2, return_exceptions=True)
+            await asyncio.gather(*reader_tasks, return_exceptions=True)
             try:
                 await asyncio.wait_for(proc.wait(), timeout=5)
             except Exception:
                 pass
             try:
-                if proc.stdin and not proc.stdin.is_closing():
+                if not use_pty and proc.stdin and not proc.stdin.is_closing():
                     proc.stdin.close()
             except Exception:
                 pass
+            if use_pty and master_fd is not None:
+                try:
+                    os.close(master_fd)
+                except Exception:
+                    pass
             _proc_unregister(pid)
 
             duration_ms = int((time.monotonic() - start) * 1000)
