@@ -53,7 +53,7 @@ All endpoints except `/` and `/health` require `Authorization: Bearer <token>`.
 | POST | `/api/exec/stdin` | Write to a spawned process's stdin `{pid, data, close}` |
 | WS | `/ws/exec` | Bidirectional exec — streaming stdin, binary-safe stdout/stderr (base64), kill, keepalive |
 
-Request body: `{cmd, args, shell, cwd, env, timeout, stdin}`. `shell:true` runs `sh -c` (for `exec`); `shell:false` passes args as argv (for `spawn`/`execFile`/`fork`, no injection).
+Request body: `{cmd, args, shell, cwd, env, timeout, stdin, binary}`. `shell:true` runs `sh -c` (for `exec`); `shell:false` passes args as argv (for `spawn`/`execFile`/`fork`, no injection). `binary:true` makes `/api/exec` also return `stdout_b64`/`stderr_b64` (base64 of raw bytes) alongside the decoded strings — lets sync callers avoid `errors="replace"` corruption.
 
 Server guarantees: process registry (every PID tracked, kill/stdin verify ownership), env sanitization (secrets like the auth token stripped from child env), timeout enforced on both sync and stream endpoints, SSE keepalive defeats proxy idle timeouts, orphan cleanup on client disconnect.
 

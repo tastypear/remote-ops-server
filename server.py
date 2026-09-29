@@ -81,6 +81,7 @@ class ExecRequest(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     timeout: int = 30                   # seconds, enforced on BOTH sync and stream endpoints
     stdin: Optional[str] = None         # one-shot stdin written before process runs
+    binary: bool = False                # True → also return stdout_b64/stderr_b64 (binary-safe)
 
 
 class StdinRequest(BaseModel):
@@ -690,13 +691,17 @@ async def exec_command(req: ExecRequest):
             },
         )
     _proc_unregister(pid)
-    return {
+    resp = {
         "stdout": stdout_b.decode(errors="replace"),
         "stderr": stderr_b.decode(errors="replace"),
         "exit_code": proc.returncode,
         "pid": pid,
         "duration_ms": int((time.monotonic() - start) * 1000),
     }
+    if req.binary:
+        resp["stdout_b64"] = base64.b64encode(stdout_b).decode("ascii")
+        resp["stderr_b64"] = base64.b64encode(stderr_b).decode("ascii")
+    return resp
 
 
 @app.post("/api/exec/stream")
