@@ -26,27 +26,27 @@ curl -s -X POST $B/api/exec -H "$H" -H "$CT" -d '{"cmd":"cat","stdin":"piped con
 echo ""
 
 echo "=== 6. File write (raw body) ==="
-curl -s -X PUT "$B/api/fs/write?path=/tmp/shim_test/hello.txt&mode=0644" -H "$H" -d "Hello from agent-shim-server!"
+curl -s -X PUT "$B/api/fs/write?path=/tmp/remote_ops_test/hello.txt&mode=0644" -H "$H" -d "Hello from remote-ops-server!"
 echo ""
 
 echo "=== 7. File read (raw body) ==="
-curl -s "$B/api/fs/read?path=/tmp/shim_test/hello.txt" -H "$H"
+curl -s "$B/api/fs/read?path=/tmp/remote_ops_test/hello.txt" -H "$H"
 echo ""
 
 echo "=== 8. File stat ==="
-curl -s "$B/api/fs/stat?path=/tmp/shim_test/hello.txt" -H "$H"
+curl -s "$B/api/fs/stat?path=/tmp/remote_ops_test/hello.txt" -H "$H"
 echo ""
 
 echo "=== 9. File list ==="
-curl -s "$B/api/fs/list?path=/tmp/shim_test" -H "$H"
+curl -s "$B/api/fs/list?path=/tmp/remote_ops_test" -H "$H"
 echo ""
 
 echo "=== 10. Batch operations ==="
-curl -s -X POST "$B/api/fs/batch" -H "$H" -H "$CT" -d '{"ops":[{"op":"write","path":"/tmp/shim_test/a.txt","content":"file A"},{"op":"write","path":"/tmp/shim_test/b.txt","content":"file B"},{"op":"mkdir","path":"/tmp/shim_test/subdir"},{"op":"delete","path":"/tmp/shim_test/hello.txt"}]}'
+curl -s -X POST "$B/api/fs/batch" -H "$H" -H "$CT" -d '{"ops":[{"op":"write","path":"/tmp/remote_ops_test/a.txt","content":"file A"},{"op":"write","path":"/tmp/remote_ops_test/b.txt","content":"file B"},{"op":"mkdir","path":"/tmp/remote_ops_test/subdir"},{"op":"delete","path":"/tmp/remote_ops_test/hello.txt"}]}'
 echo ""
 
 echo "=== 11. List after batch ==="
-curl -s "$B/api/fs/list?path=/tmp/shim_test" -H "$H"
+curl -s "$B/api/fs/list?path=/tmp/remote_ops_test" -H "$H"
 echo ""
 
 echo "=== 12. Which ==="
@@ -54,10 +54,10 @@ curl -s "$B/api/which?cmd=python3" -H "$H"
 echo ""
 
 echo "=== 13. Mkdir + move + copy ==="
-curl -s -X POST "$B/api/fs/mkdir" -H "$H" -H "$CT" -d '{"path":"/tmp/shim_test/movedir"}'
-curl -s -X POST "$B/api/fs/move" -H "$H" -H "$CT" -d '{"src":"/tmp/shim_test/a.txt","dst":"/tmp/shim_test/movedir/a.txt"}'
-curl -s -X POST "$B/api/fs/copy" -H "$H" -H "$CT" -d '{"src":"/tmp/shim_test/b.txt","dst":"/tmp/shim_test/b_copy.txt"}'
-curl -s "$B/api/fs/list?path=/tmp/shim_test&recursive=true" -H "$H"
+curl -s -X POST "$B/api/fs/mkdir" -H "$H" -H "$CT" -d '{"path":"/tmp/remote_ops_test/movedir"}'
+curl -s -X POST "$B/api/fs/move" -H "$H" -H "$CT" -d '{"src":"/tmp/remote_ops_test/a.txt","dst":"/tmp/remote_ops_test/movedir/a.txt"}'
+curl -s -X POST "$B/api/fs/copy" -H "$H" -H "$CT" -d '{"src":"/tmp/remote_ops_test/b.txt","dst":"/tmp/remote_ops_test/b_copy.txt"}'
+curl -s "$B/api/fs/list?path=/tmp/remote_ops_test&recursive=true" -H "$H"
 echo ""
 
 echo "=== 14. Auth failure (no token) ==="
@@ -65,12 +65,12 @@ curl -s -X POST "$B/api/exec" -H "$CT" -d '{"cmd":"echo should fail"}'
 echo ""
 
 echo "=== 15. Patch ==="
-curl -s -X PUT "$B/api/fs/write?path=/tmp/shim_test/patch_test.txt" -H "$H" -d "line1
+curl -s -X PUT "$B/api/fs/write?path=/tmp/remote_ops_test/patch_test.txt" -H "$H" -d "line1
 line2
 line3"
-curl -s -X POST "$B/api/fs/patch" -H "$H" -H "$CT" -d '{"path":"/tmp/shim_test/patch_test.txt","patch":"*** Begin Patch\n*** Update File: /tmp/shim_test/patch_test.txt\n@@ -1,3 +1,3 @@\n line1\n-line2\n+line2 modified\n line3\n*** End Patch"}'
+curl -s -X POST "$B/api/fs/patch" -H "$H" -H "$CT" -d '{"path":"/tmp/remote_ops_test/patch_test.txt","patch":"*** Begin Patch\n*** Update File: /tmp/remote_ops_test/patch_test.txt\n@@ -1,3 +1,3 @@\n line1\n-line2\n+line2 modified\n line3\n*** End Patch"}'
 echo ""
-curl -s "$B/api/fs/read?path=/tmp/shim_test/patch_test.txt" -H "$H"
+curl -s "$B/api/fs/read?path=/tmp/remote_ops_test/patch_test.txt" -H "$H"
 echo ""
 
 echo "=== 16. Exec stream (SSE) ==="

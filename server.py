@@ -1,7 +1,7 @@
 """
-agent-shim-server: HTTP backend for agent-shim.
+remote-ops-server: HTTP backend for remote file and process operations.
 Provides command execution + file management API over HTTP,
-designed to replace SSH+SFTP as the transport layer for AI agents.
+designed to replace SSH+SFTP as the transport layer for remote hosts.
 """
 import asyncio
 import base64
@@ -26,11 +26,11 @@ from fastapi.responses import JSONResponse, StreamingResponse, Response
 from pydantic import BaseModel, Field
 
 # ─── Config ──────────────────────────────────────────────────────────────
-API_TOKEN = os.environ.get("AGENT_SHIM_TOKEN", "dev-token-change-me")
-HOST = os.environ.get("AGENT_SHIM_HOST", "0.0.0.0")
-PORT = int(os.environ.get("AGENT_SHIM_PORT", "8765"))
+API_TOKEN = os.environ.get("REMOTE_OPS_TOKEN", "dev-token-change-me")
+HOST = os.environ.get("REMOTE_OPS_HOST", "0.0.0.0")
+PORT = int(os.environ.get("REMOTE_OPS_PORT", "8765"))
 CHUNK_SIZE = 65536  # 64 KB read chunks
-ENABLE_CORS = os.environ.get("AGENT_SHIM_CORS", "false").lower() == "true"
+ENABLE_CORS = os.environ.get("REMOTE_OPS_CORS", "false").lower() == "true"
 
 
 # Lifespan: starts the fd-table and process-table background sweepers on
@@ -47,7 +47,7 @@ async def lifespan(app):
         proc_task.cancel()
 
 
-app = FastAPI(title="agent-shim-server", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="remote-ops-server", version="0.1.0", lifespan=lifespan)
 
 if ENABLE_CORS:
     from fastapi.middleware.cors import CORSMiddleware
@@ -89,7 +89,7 @@ class StdinRequest(BaseModel):
 
 
 # Env keys never inherited from the server's own environment — prevents
-# AGENT_SHIM_TOKEN and other secrets from leaking into child processes.
+# REMOTE_OPS_TOKEN and other secrets from leaking into child processes.
 _SENSITIVE_ENV = ("TOKEN", "SECRET", "KEY", "PASSWORD", "CREDENTIAL", "AUTH")
 
 
@@ -542,7 +542,7 @@ async def fs_watch(
 @app.get("/")
 async def root():
     return {
-        "name": "agent-shim-server",
+        "name": "remote-ops-server",
         "version": "0.1.0",
         "endpoints": {
             "exec": ["POST /api/exec", "POST /api/exec/stream", "POST /api/exec/kill", "POST /api/exec/stdin"],
@@ -569,7 +569,7 @@ async def health():
 # Entries are removed on process exit or reaped by a background sweeper.
 # Mirrors the _fd_table / _fd_sweeper pattern used by the fd session layer.
 _proc_table: dict[int, dict] = {}   # {pid: {proc, cmd, spawn_time, last_use}}
-_PROC_MAX_IDLE = 1800               # 30 min — safety reap for orphaned entries
+_PROC_MAX_IDLE = 300                # 5 min — matches fd TTL; reaps orphaned processes promptly
 
 
 def _proc_register(proc, cmd: str) -> None:
@@ -1353,6 +1353,6 @@ async def get_env():
 
 # ─── Main ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    print(f"agent-shim-server starting on {HOST}:{PORT}")
+    print(f"remote-ops-server starting on {HOST}:{PORT}")
     print(f"Auth token: {API_TOKEN}")
     uvicorn.run(app, host=HOST, port=PORT, log_level="info")

@@ -2,14 +2,14 @@
 
 HTTP backend for [remote-fs-node](https://github.com/tastypear/remote-fs-node) and [remote-cp-node](https://github.com/tastypear/remote-cp-node). A single Python/FastAPI server providing both **filesystem** (SFTP replacement) and **command execution** (SSH exec replacement) APIs over HTTP.
 
-Designed to replace SSH+SFTP+exec as the transport layer for AI agents — plain HTTP means CDN acceleration (Cloudflare Tunnel), connection pooling, and native batch/patch operations that SSH can't offer.
+Designed to replace SSH+SFTP+exec as the transport layer for remote hosts — plain HTTP means CDN acceleration (Cloudflare Tunnel), connection pooling, and native batch/patch operations that SSH can't offer.
 
 ## Quick start
 
 ```bash
 cd remote-ops-server
 pip3 install -r requirements.txt
-AGENT_SHIM_TOKEN=my-secret python3 server.py
+REMOTE_OPS_TOKEN=my-secret python3 server.py
 ```
 
 Or use the launcher (generates a random token if none set):
@@ -24,10 +24,10 @@ Server listens on `0.0.0.0:8765` by default.
 
 | Variable | Default | Description |
 |---|---|---|
-| `AGENT_SHIM_TOKEN` | `dev-token-change-me` | Bearer token for auth |
-| `AGENT_SHIM_HOST` | `0.0.0.0` | Bind address |
-| `AGENT_SHIM_PORT` | `8765` | Listen port |
-| `AGENT_SHIM_CORS` | `false` | Enable CORS (`true`/`false`) |
+| `REMOTE_OPS_TOKEN` | `dev-token-change-me` | Bearer token for auth |
+| `REMOTE_OPS_HOST` | `0.0.0.0` | Bind address |
+| `REMOTE_OPS_PORT` | `8765` | Listen port |
+| `REMOTE_OPS_CORS` | `false` | Enable CORS (`true`/`false`) |
 
 ## Clients
 
@@ -127,7 +127,7 @@ After=network.target
 
 [Service]
 ExecStart=/usr/bin/python3 /opt/remote-ops-server/server.py
-Environment=AGENT_SHIM_TOKEN=your-secret
+Environment=REMOTE_OPS_TOKEN=your-secret
 Restart=always
 User=root
 
