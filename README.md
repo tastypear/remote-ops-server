@@ -1,4 +1,4 @@
-# remote-fs-py
+# remote-ops-server
 
 HTTP backend for [remote-fs-node](https://github.com/tastypear/remote-fs-node) and [remote-cp-node](https://github.com/tastypear/remote-cp-node). A single Python/FastAPI server providing both **filesystem** (SFTP replacement) and **command execution** (SSH exec replacement) APIs over HTTP.
 
@@ -7,7 +7,7 @@ Designed to replace SSH+SFTP+exec as the transport layer for AI agents — plain
 ## Quick start
 
 ```bash
-cd remote-fs-py
+cd remote-ops-server
 pip3 install -r requirements.txt
 AGENT_SHIM_TOKEN=my-secret python3 server.py
 ```
@@ -122,11 +122,11 @@ All fs endpoints return structured HTTP errors (404 ENOENT, 409 EEXIST, 403 EACC
 
 ```ini
 [Unit]
-Description=remote-fs-py
+Description=remote-ops-server
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/python3 /opt/remote-fs-py/server.py
+ExecStart=/usr/bin/python3 /opt/remote-ops-server/server.py
 Environment=AGENT_SHIM_TOKEN=your-secret
 Restart=always
 User=root
