@@ -989,6 +989,7 @@ async def ws_exec(ws: WebSocket):
 
         use_pty = bool(msg.get("pty"))
         detachable = bool(msg.get("detach"))
+        use_binary = bool(msg.get("binaryFrames"))
         master_fd = None
 
         try:
@@ -1046,17 +1047,21 @@ async def ws_exec(ws: WebSocket):
                     pass
 
         async def reader(stream, stream_type):
+            prefix = b"\x00" if stream_type == "stdout" else b"\x01"
             try:
                 while True:
                     chunk = await stream.read(CHUNK_SIZE)
                     if not chunk:
                         break
-                    try:
-                        text = chunk.decode("utf-8")
-                        await queue.put({"type": stream_type, "data": text, "encoding": "utf8"})
-                    except UnicodeDecodeError:
-                        b64 = base64.b64encode(chunk).decode("ascii")
-                        await queue.put({"type": stream_type, "data": b64, "encoding": "base64"})
+                    if use_binary:
+                        await queue.put(prefix + chunk)
+                    else:
+                        try:
+                            text = chunk.decode("utf-8")
+                            await queue.put({"type": stream_type, "data": text, "encoding": "utf8"})
+                        except UnicodeDecodeError:
+                            b64 = base64.b64encode(chunk).decode("ascii")
+                            await queue.put({"type": stream_type, "data": b64, "encoding": "base64"})
             except Exception as e:
                 await queue.put({"type": "error", "data": str(e)})
             finally:
@@ -1070,19 +1075,20 @@ async def ws_exec(ws: WebSocket):
                         try:
                             chunk = await loop.run_in_executor(None, os.read, master_fd, CHUNK_SIZE)
                         except OSError as e:
-                            # EIO on the master fd means the child exited (slave
-                            # closed) — treat as EOF, not an error.
                             if e.errno == errno.EIO:
                                 break
                             raise
                         if not chunk:
                             break
-                        try:
-                            text = chunk.decode("utf-8")
-                            await queue.put({"type": "stdout", "data": text, "encoding": "utf8"})
-                        except UnicodeDecodeError:
-                            b64 = base64.b64encode(chunk).decode("ascii")
-                            await queue.put({"type": "stdout", "data": b64, "encoding": "base64"})
+                        if use_binary:
+                            await queue.put(b"\x00" + chunk)
+                        else:
+                            try:
+                                text = chunk.decode("utf-8")
+                                await queue.put({"type": "stdout", "data": text, "encoding": "utf8"})
+                            except UnicodeDecodeError:
+                                b64 = base64.b64encode(chunk).decode("ascii")
+                                await queue.put({"type": "stdout", "data": b64, "encoding": "base64"})
                 except Exception as e:
                     await queue.put({"type": "error", "data": str(e)})
                 finally:
@@ -1165,7 +1171,10 @@ async def ws_exec(ws: WebSocket):
                     done += 1
                 else:
                     _proc_touch(pid)
-                    await ws.send_json(item)
+                    if isinstance(item, bytes):
+                        await ws.send_bytes(item)
+                    else:
+                        await ws.send_json(item)
         except WebSocketDisconnect:
             if not detachable:
                 _kill_proc(proc)
