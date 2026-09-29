@@ -934,6 +934,7 @@ def _ws_auth(ws: WebSocket) -> bool:
 
 
 _ws_connections: int = 0   # active /ws/exec sessions (bounded by WS_MAX_CONN)
+_drain_tasks: set = set()   # strong refs to detached drain tasks (prevent GC pre-3.12)
 
 
 def _pty_set_winsize(fd: int, rows: int, cols: int) -> None:
@@ -1215,7 +1216,9 @@ async def ws_exec(ws: WebSocket):
                 for t in reader_tasks:
                     t.cancel()
                 await asyncio.gather(*reader_tasks, return_exceptions=True)
-                asyncio.create_task(_drain_proc(proc, master_fd, use_pty, pid))
+                dt = asyncio.create_task(_drain_proc(proc, master_fd, use_pty, pid))
+                _drain_tasks.add(dt)
+                dt.add_done_callback(_drain_tasks.discard)
             else:
                 await asyncio.gather(*reader_tasks, return_exceptions=True)
                 try:
