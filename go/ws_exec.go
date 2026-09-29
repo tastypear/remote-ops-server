@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -17,6 +18,16 @@ import (
 
 var wsUpgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 var drainTasks sync.WaitGroup
+
+func spawnErrCode(err error) string {
+	if errors.Is(err, exec.ErrNotFound) || os.IsNotExist(err) {
+		return "ENOENT"
+	}
+	if os.IsPermission(err) {
+		return "EACCES"
+	}
+	return "ENOENT"
+}
 
 func wsExec(w http.ResponseWriter, r *http.Request) {
 	auth := r.Header.Get("Authorization")
@@ -78,33 +89,28 @@ func wsExec(w http.ResponseWriter, r *http.Request) {
 
 	if usePty {
 		c = buildCmd(&req)
-		if c.SysProcAttr == nil {
-			c.SysProcAttr = &syscall.SysProcAttr{}
-		}
-		c.SysProcAttr.Setpgid = true
+		c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 		m, err := pty.Start(c)
 		if err != nil {
-			ws.WriteJSON(map[string]any{"type": "error", "data": "spawn " + req.Cmd + " ENOENT", "code": "ENOENT"})
+			code := spawnErrCode(err)
+			ws.WriteJSON(map[string]any{"type": "error", "data": "spawn " + req.Cmd + " " + code, "code": code})
 			ws.WriteJSON(map[string]any{"type": "exit", "code": -2, "signal": nil, "duration_ms": 0})
 			return
 		}
 		master = m
-		rows := intVal(msg, "rows", 24)
-		cols := intVal(msg, "cols", 80)
-		pty.Setsize(master, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)})
+		pty.Setsize(master, &pty.Winsize{Rows: uint16(intVal(msg, "rows", 24)), Cols: uint16(intVal(msg, "cols", 80))})
 	} else {
 		c = buildCmd(&req)
-		c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		sw, err := c.StdinPipe()
+		stdinWriter, err = c.StdinPipe()
 		if err != nil {
 			ws.WriteJSON(map[string]any{"type": "error", "data": err.Error()})
 			return
 		}
-		stdinWriter = sw
 		stdoutPipe, _ = c.StdoutPipe()
 		stderrPipe, _ = c.StderrPipe()
 		if err := c.Start(); err != nil {
-			ws.WriteJSON(map[string]any{"type": "error", "data": "spawn " + req.Cmd + " ENOENT", "code": "ENOENT"})
+			code := spawnErrCode(err)
+			ws.WriteJSON(map[string]any{"type": "error", "data": "spawn " + req.Cmd + " " + code, "code": code})
 			ws.WriteJSON(map[string]any{"type": "exit", "code": -2, "signal": nil, "duration_ms": 0})
 			return
 		}
@@ -124,6 +130,7 @@ func wsExec(w http.ResponseWriter, r *http.Request) {
 
 	start := time.Now()
 	queue := make(chan any, 32)
+	disconnect := make(chan struct{})
 
 	numReaders := 2
 	if usePty {
@@ -134,8 +141,7 @@ func wsExec(w http.ResponseWriter, r *http.Request) {
 		go pipeReader(stderrPipe, "stderr", queue, useBinary)
 	}
 
-	stopStdin := make(chan struct{})
-	go wsStdinWriter(ws, c, master, stdinWriter, usePty, pid, detachable, stopStdin)
+	go wsStdinWriter(ws, c, master, stdinWriter, usePty, pid, detachable, disconnect)
 
 	deadline := time.Time{}
 	if req.Timeout > 0 {
@@ -143,8 +149,9 @@ func wsExec(w http.ResponseWriter, r *http.Request) {
 	}
 	timedOut := false
 	done := 0
+	clientGone := false
 
-	for done < numReaders {
+	for done < numReaders && !clientGone {
 		var timeout <-chan time.Time
 		if !deadline.IsZero() {
 			rem := time.Until(deadline)
@@ -162,12 +169,14 @@ func wsExec(w http.ResponseWriter, r *http.Request) {
 		}
 
 		select {
+		case <-disconnect:
+			clientGone = true
 		case <-timeout:
 			if !deadline.IsZero() && time.Until(deadline) <= 0 {
 				timedOut = true
-				break
+			} else if err := ws.WriteJSON(map[string]any{"type": "keepalive"}); err != nil {
+				clientGone = true
 			}
-			ws.WriteJSON(map[string]any{"type": "keepalive"})
 		case item := <-queue:
 			if item == nil {
 				done++
@@ -175,9 +184,13 @@ func wsExec(w http.ResponseWriter, r *http.Request) {
 				procTouch(pid)
 				switch v := item.(type) {
 				case []byte:
-					ws.WriteMessage(websocket.BinaryMessage, v)
+					if err := ws.WriteMessage(websocket.BinaryMessage, v); err != nil {
+						clientGone = true
+					}
 				default:
-					ws.WriteJSON(v)
+					if err := ws.WriteJSON(v); err != nil {
+						clientGone = true
+					}
 				}
 			}
 		}
@@ -186,10 +199,8 @@ func wsExec(w http.ResponseWriter, r *http.Request) {
 	if timedOut {
 		killProcGroup(c.Process)
 	}
-	close(stopStdin)
-	c.Wait()
 
-	if detachable && !timedOut {
+	if clientGone && detachable && !timedOut {
 		drainTasks.Add(1)
 		go func() {
 			defer drainTasks.Done()
@@ -202,6 +213,11 @@ func wsExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if clientGone && !detachable {
+		killProcGroup(c.Process)
+	}
+
+	c.Wait()
 	if master != nil {
 		master.Close()
 	}
@@ -314,13 +330,11 @@ func ptyReader(master *os.File, queue chan any, useBinary bool) {
 	queue <- nil
 }
 
-func wsStdinWriter(ws *websocket.Conn, c *exec.Cmd, master *os.File, stdin io.WriteCloser, usePty bool, pid int, detachable bool, stop chan struct{}) {
+func wsStdinWriter(ws *websocket.Conn, c *exec.Cmd, master *os.File, stdin io.WriteCloser, usePty bool, pid int, detachable bool, disconnect chan struct{}) {
 	for {
 		_, raw, err := ws.ReadMessage()
 		if err != nil {
-			if !detachable {
-				killProcGroup(c.Process)
-			}
+			close(disconnect)
 			return
 		}
 		var msg map[string]any
@@ -330,16 +344,16 @@ func wsStdinWriter(ws *websocket.Conn, c *exec.Cmd, master *os.File, stdin io.Wr
 		switch msg["type"] {
 		case "stdin":
 			data, _ := msg["data"].(string)
-			var bytes []byte
+			var b []byte
 			if msg["encoding"] == "base64" {
-				bytes, _ = base64.StdEncoding.DecodeString(data)
+				b, _ = base64.StdEncoding.DecodeString(data)
 			} else {
-				bytes = []byte(data)
+				b = []byte(data)
 			}
 			if usePty {
-				master.Write(bytes)
+				master.Write(b)
 			} else if stdin != nil {
-				stdin.Write(bytes)
+				stdin.Write(b)
 			}
 			procTouch(pid)
 		case "stdin_close":

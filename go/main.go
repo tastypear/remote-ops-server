@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"context"
 	"log"
 	"net/http"
@@ -47,7 +48,7 @@ type procEntry struct {
 	spawnTime time.Time
 	lastUse   time.Time
 	proc      *os.Process
- stdin     *os.File // non-nil for stream/WS procs (for stdin writes)
+ stdin     io.WriteCloser // non-nil for stream procs (for /api/exec/stdin writes)
 	done      chan struct{} // closed when process exits
 }
 
@@ -129,7 +130,7 @@ func registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/exec/stdin", execStdin)
 
 	// websocket
-	mux.HandleFunc("/ws/exec", wsExec)
+	mux.HandleFunc("GET /ws/exec", wsExec)
 
 	// fs basic
 	mux.HandleFunc("GET /api/fs/stat", fsStat)

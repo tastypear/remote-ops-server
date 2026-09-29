@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -99,7 +100,7 @@ func statToDictFollow(path string) (map[string]any, error) {
 	return statToDict(&st), nil
 }
 
-func procRegister(pid int, cmd string, proc *os.Process, stdin *os.File) *procEntry {
+func procRegister(pid int, cmd string, proc *os.Process, stdin io.WriteCloser) *procEntry {
 	e := &procEntry{
 		cmd:       cmd,
 		spawnTime: time.Now(),

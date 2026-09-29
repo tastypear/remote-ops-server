@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"net/http"
 	"bytes"
 	"encoding/base64"
@@ -104,7 +105,7 @@ func execSync(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := c.Start(); err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, exec.ErrNotFound) || os.IsNotExist(err) {
 			writeJSON(w, 404, map[string]any{"error": "command not found", "error_code": "ENOENT", "cmd": req.Cmd, "stdout": "", "stderr": "", "exit_code": -2, "pid": 0, "duration_ms": msSince(start)})
 			return
 		}

@@ -39,7 +39,7 @@ func execStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pid := c.Process.Pid
-	e := procRegister(pid, req.Cmd, c.Process, nil)
+	e := procRegister(pid, req.Cmd, c.Process, stdinPipe)
 	defer procUnregister(pid)
 	defer close(e.done)
 
