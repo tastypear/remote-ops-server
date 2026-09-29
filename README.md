@@ -50,10 +50,13 @@ All endpoints except `/` and `/health` require `Authorization: Bearer <token>`.
 | POST | `/api/exec/stream` | Execute command (SSE streaming) — `pid` → `stdout`/`stderr` → `exit` frames; keepalive on idle |
 | POST | `/api/exec/kill?pid=&signal_name=` | Kill a spawned process (ownership-checked, process-group `os.killpg`) |
 | POST | `/api/exec/stdin` | Write to a spawned process's stdin `{pid, data, close}` |
+| WS | `/ws/exec` | Bidirectional exec — streaming stdin, binary-safe stdout/stderr (base64), kill, keepalive |
 
 Request body: `{cmd, args, shell, cwd, env, timeout, stdin}`. `shell:true` runs `sh -c` (for `exec`); `shell:false` passes args as argv (for `spawn`/`execFile`/`fork`, no injection).
 
 Server guarantees: process registry (every PID tracked, kill/stdin verify ownership), env sanitization (secrets like the auth token stripped from child env), timeout enforced on both sync and stream endpoints, SSE keepalive defeats proxy idle timeouts, orphan cleanup on client disconnect.
+
+**`/ws/exec`** covers two edge cases SSE can't: true streaming stdin (write → read → write, interactive) and binary-safe stdout/stderr. Auth via `Authorization: Bearer <token>` header (preferred) or `?token=` query param. JSON message protocol — see `ws_exec` docstring in `server.py` for the full frame reference.
 
 ### File Descriptors (stateful fd session)
 

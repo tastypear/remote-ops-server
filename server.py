@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Optional
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse, Response
 from pydantic import BaseModel, Field
 
@@ -545,7 +545,7 @@ async def root():
         "name": "remote-ops-server",
         "version": "0.1.0",
         "endpoints": {
-            "exec": ["POST /api/exec", "POST /api/exec/stream", "POST /api/exec/kill", "POST /api/exec/stdin"],
+            "exec": ["POST /api/exec", "POST /api/exec/stream", "POST /api/exec/kill", "POST /api/exec/stdin", "WS /ws/exec"],
             "fs": [
                 "GET /api/fs/stat", "GET /api/fs/read", "PUT /api/fs/write",
                 "POST /api/fs/delete", "POST /api/fs/mkdir", "POST /api/fs/move",
@@ -586,6 +586,13 @@ def _proc_get(pid: int):
     if entry:
         entry["last_use"] = time.monotonic()
     return entry
+
+
+def _proc_touch(pid: int) -> None:
+    """Mark a process as recently active so the sweeper doesn't reap it."""
+    entry = _proc_table.get(pid)
+    if entry:
+        entry["last_use"] = time.monotonic()
 
 
 async def _proc_sweeper():
@@ -848,6 +855,213 @@ async def exec_stdin(req: StdinRequest):
     except (BrokenPipeError, RuntimeError) as e:
         return JSONResponse(status_code=409, content={"error": str(e), "pid": req.pid})
     return {"ok": True, "pid": req.pid}
+
+
+# ─── WebSocket exec (bidirectional, streaming stdin + binary-safe) ───────
+# Edge cases that SSE can't handle:
+#   1. True streaming stdin (write → read → write, interactive)
+#   2. Binary-safe stdout/stderr (base64 fallback; SSE used errors="replace")
+#   3. Real-time bidirectional (sub-frame latency both directions)
+#
+# Message protocol (JSON text frames):
+#   Client → Server:
+#     {"type":"start","cmd":"...","args":[...],"shell":true,"cwd":"/tmp","env":{},"timeout":30}
+#     {"type":"stdin","data":"...","encoding":"utf8"}         # text stdin
+#     {"type":"stdin","data":"base64...","encoding":"base64"} # binary stdin
+#     {"type":"stdin_close"}                                  # EOF
+#     {"type":"kill","signal":"SIGTERM"}
+#
+#   Server → Client:
+#     {"type":"pid","pid":12345}
+#     {"type":"stdout","data":"...","encoding":"utf8"}
+#     {"type":"stdout","data":"base64...","encoding":"base64"}
+#     {"type":"stderr","data":"...","encoding":"utf8"}
+#     {"type":"exit","code":0,"signal":null,"duration_ms":123}
+#     {"type":"error","data":"..."}
+#     {"type":"keepalive"}                                    # idle ping
+
+
+def _ws_auth(ws: WebSocket) -> bool:
+    """Bearer header first (keeps token out of URLs/logs), query param as fallback."""
+    auth = ws.headers.get("authorization", "")
+    if auth.startswith("Bearer ") and auth[7:] == API_TOKEN:
+        return True
+    return ws.query_params.get("token", "") == API_TOKEN
+
+
+@app.websocket("/ws/exec")
+async def ws_exec(ws: WebSocket):
+    await ws.accept()
+
+    if not _ws_auth(ws):
+        await ws.send_json({"type": "error", "data": "unauthorized"})
+        await ws.close(code=4401)
+        return
+
+    proc = None
+    pid = None
+    try:
+        msg = json.loads(await ws.receive_text())
+        if msg.get("type") != "start":
+            await ws.send_json({"type": "error", "data": "expected start message"})
+            await ws.close()
+            return
+
+        # Build ExecRequest from known fields only (ignore unknown keys).
+        known = ExecRequest.model_fields
+        req = ExecRequest(**{k: v for k, v in msg.items() if k in known})
+
+        try:
+            proc = await _spawn(req)
+        except FileNotFoundError:
+            await ws.send_json({"type": "error", "data": f"command not found: {req.cmd}"})
+            await ws.send_json({"type": "exit", "code": -2, "signal": None, "duration_ms": 0})
+            await ws.close()
+            return
+        except Exception as e:
+            await ws.send_json({"type": "error", "data": str(e)})
+            await ws.send_json({"type": "exit", "code": -2, "signal": None, "duration_ms": 0})
+            await ws.close()
+            return
+
+        pid = proc.pid
+        await ws.send_json({"type": "pid", "pid": pid})
+
+        deadline = time.monotonic() + req.timeout if req.timeout and req.timeout > 0 else None
+        start = time.monotonic()
+        queue: asyncio.Queue = asyncio.Queue()
+
+        # One-shot initial stdin (no EOF — streaming stdin may follow).
+        if req.stdin:
+            try:
+                proc.stdin.write(req.stdin.encode())
+                await proc.stdin.drain()
+            except (BrokenPipeError, RuntimeError):
+                pass
+
+        async def reader(stream, stream_type):
+            try:
+                while True:
+                    chunk = await stream.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    try:
+                        text = chunk.decode("utf-8")
+                        await queue.put({"type": stream_type, "data": text, "encoding": "utf8"})
+                    except UnicodeDecodeError:
+                        b64 = base64.b64encode(chunk).decode("ascii")
+                        await queue.put({"type": stream_type, "data": b64, "encoding": "base64"})
+            except Exception as e:
+                await queue.put({"type": "error", "data": str(e)})
+            finally:
+                await queue.put(None)
+
+        t1 = asyncio.create_task(reader(proc.stdout, "stdout"))
+        t2 = asyncio.create_task(reader(proc.stderr, "stderr"))
+
+        async def stdin_writer():
+            """Receive client messages and write to proc.stdin / kill."""
+            try:
+                while True:
+                    raw = await ws.receive_text()
+                    m = json.loads(raw)
+                    t = m.get("type")
+                    if t == "stdin":
+                        data = m.get("data", "")
+                        if m.get("encoding") == "base64":
+                            data = base64.b64decode(data)
+                        else:
+                            data = data.encode("utf-8")
+                        try:
+                            proc.stdin.write(data)
+                            await proc.stdin.drain()
+                        except (BrokenPipeError, RuntimeError):
+                            pass
+                        _proc_touch(pid)
+                    elif t == "stdin_close":
+                        try:
+                            proc.stdin.close()
+                        except Exception:
+                            pass
+                        # Do NOT return — keep receiving so kill after EOF works.
+                    elif t == "kill":
+                        sig = getattr(signal_module, m.get("signal", "SIGTERM"), signal_module.SIGTERM)
+                        _kill_proc(proc, sig)
+            except WebSocketDisconnect:
+                _kill_proc(proc)
+            except Exception:
+                pass
+
+        stdin_task = asyncio.create_task(stdin_writer())
+
+        timed_out = False
+        done = 0
+        try:
+            while done < 2:
+                remaining = None
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        timed_out = True
+                        break
+                wait = remaining if remaining is not None and remaining < 15 else 15
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=wait)
+                except asyncio.TimeoutError:
+                    await ws.send_json({"type": "keepalive"})
+                    continue
+                if item is None:
+                    done += 1
+                else:
+                    _proc_touch(pid)
+                    await ws.send_json(item)
+        except (WebSocketDisconnect, asyncio.CancelledError):
+            _kill_proc(proc)
+            raise
+        finally:
+            stdin_task.cancel()
+            if timed_out:
+                _kill_proc(proc)
+            await asyncio.gather(t1, t2, return_exceptions=True)
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except Exception:
+                pass
+            try:
+                if proc.stdin and not proc.stdin.is_closing():
+                    proc.stdin.close()
+            except Exception:
+                pass
+            _proc_unregister(pid)
+
+            duration_ms = int((time.monotonic() - start) * 1000)
+            code = proc.returncode
+            signal_name = "SIGKILL" if timed_out else None
+            try:
+                await ws.send_json({
+                    "type": "exit",
+                    "code": code,
+                    "signal": signal_name,
+                    "duration_ms": duration_ms,
+                })
+            except Exception:
+                pass
+
+    except WebSocketDisconnect:
+        if proc:
+            _kill_proc(proc)
+        if pid is not None:
+            _proc_unregister(pid)
+    except Exception as e:
+        try:
+            await ws.send_json({"type": "error", "data": str(e)})
+        except Exception:
+            pass
+    finally:
+        try:
+            await ws.close()
+        except Exception:
+            pass
 
 
 # ─── File operations ─────────────────────────────────────────────────────
