@@ -31,6 +31,7 @@ HOST = os.environ.get("REMOTE_OPS_HOST", "0.0.0.0")
 PORT = int(os.environ.get("REMOTE_OPS_PORT", "8765"))
 CHUNK_SIZE = 65536  # 64 KB read chunks
 ENABLE_CORS = os.environ.get("REMOTE_OPS_CORS", "false").lower() == "true"
+WS_MAX_CONN = int(os.environ.get("REMOTE_OPS_WS_MAX_CONN", "64"))  # concurrent WS exec sessions
 
 
 # Lifespan: starts the fd-table and process-table background sweepers on
@@ -889,8 +890,12 @@ def _ws_auth(ws: WebSocket) -> bool:
     return ws.query_params.get("token", "") == API_TOKEN
 
 
+_ws_connections: int = 0   # active /ws/exec sessions (bounded by WS_MAX_CONN)
+
+
 @app.websocket("/ws/exec")
 async def ws_exec(ws: WebSocket):
+    global _ws_connections
     await ws.accept()
 
     if not _ws_auth(ws):
@@ -898,6 +903,12 @@ async def ws_exec(ws: WebSocket):
         await ws.close(code=4401)
         return
 
+    if _ws_connections >= WS_MAX_CONN:
+        await ws.send_json({"type": "error", "data": "too many connections"})
+        await ws.close(code=4429)
+        return
+
+    _ws_connections += 1
     proc = None
     pid = None
     try:
@@ -1058,6 +1069,7 @@ async def ws_exec(ws: WebSocket):
         except Exception:
             pass
     finally:
+        _ws_connections -= 1
         try:
             await ws.close()
         except Exception:

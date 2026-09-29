@@ -28,6 +28,7 @@ Server listens on `0.0.0.0:8765` by default.
 | `REMOTE_OPS_HOST` | `0.0.0.0` | Bind address |
 | `REMOTE_OPS_PORT` | `8765` | Listen port |
 | `REMOTE_OPS_CORS` | `false` | Enable CORS (`true`/`false`) |
+| `REMOTE_OPS_WS_MAX_CONN` | `64` | Max concurrent `/ws/exec` sessions (rejects excess with 4429) |
 
 ## Clients
 
