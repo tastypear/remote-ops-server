@@ -210,7 +210,9 @@ func fsBatch(w http.ResponseWriter, r *http.Request) {
 }
 
 func fsPatch(w http.ResponseWriter, r *http.Request) {
-	var req struct{ Patch string `json:"patch"` }
+	var req struct {
+		Patch string `json:"patch"`
+	}
 	if err := readJSON(r, &req); err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return

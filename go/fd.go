@@ -112,7 +112,9 @@ func fdWrite(w http.ResponseWriter, r *http.Request) {
 }
 
 func fdClose(w http.ResponseWriter, r *http.Request) {
-	var req struct{ Fd int `json:"fd"` }
+	var req struct {
+		Fd int `json:"fd"`
+	}
 	if err := readJSON(r, &req); err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
@@ -166,7 +168,9 @@ func fdFtruncate(w http.ResponseWriter, r *http.Request) {
 }
 
 func fdFsync(w http.ResponseWriter, r *http.Request) {
-	var req struct{ Fd int `json:"fd"` }
+	var req struct {
+		Fd int `json:"fd"`
+	}
 	if err := readJSON(r, &req); err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return

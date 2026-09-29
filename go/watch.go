@@ -11,9 +11,9 @@ import (
 )
 
 type fileState struct {
-	mtime  int64
-	size   int64
-	isDir  bool
+	mtime int64
+	size  int64
+	isDir bool
 }
 
 func scanDir(base string, recursive bool) map[string]fileState {

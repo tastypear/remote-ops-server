@@ -1,10 +1,10 @@
 package main
 
 import (
-	"errors"
-	"net/http"
 	"bytes"
 	"encoding/base64"
+	"errors"
+	"net/http"
 	"os"
 	"os/exec"
 	"strings"

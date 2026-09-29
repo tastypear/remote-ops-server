@@ -1,8 +1,8 @@
 package main
 
 import (
-	"io"
 	"context"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -48,8 +48,8 @@ type procEntry struct {
 	spawnTime time.Time
 	lastUse   time.Time
 	proc      *os.Process
- stdin     io.WriteCloser // non-nil for stream procs (for /api/exec/stdin writes)
-	done      chan struct{} // closed when process exits
+	stdin     io.WriteCloser // non-nil for stream procs (for /api/exec/stdin writes)
+	done      chan struct{}  // closed when process exits
 }
 
 // fdTable tracks open file descriptors for ranged read/write.

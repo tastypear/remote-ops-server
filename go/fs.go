@@ -129,7 +129,9 @@ func fsWrite(w http.ResponseWriter, r *http.Request) {
 }
 
 func fsDelete(w http.ResponseWriter, r *http.Request) {
-	var req struct{ Path string `json:"path"` }
+	var req struct {
+		Path string `json:"path"`
+	}
 	if err := readJSON(r, &req); err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
@@ -178,7 +180,10 @@ func fsMkdir(w http.ResponseWriter, r *http.Request) {
 }
 
 func fsMove(w http.ResponseWriter, r *http.Request) {
-	var req struct{ Src, Dst string `json:"src"` }
+	var req struct {
+		Src string
+		Dst string `json:"src"`
+	}
 	if err := readJSON(r, &req); err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
@@ -194,7 +199,10 @@ func fsMove(w http.ResponseWriter, r *http.Request) {
 }
 
 func fsCopy(w http.ResponseWriter, r *http.Request) {
-	var req struct{ Src, Dst string `json:"src"` }
+	var req struct {
+		Src string
+		Dst string `json:"src"`
+	}
 	if err := readJSON(r, &req); err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
@@ -255,7 +263,10 @@ func copyFile(src, dst string, info os.FileInfo) error {
 }
 
 func fsChmod(w http.ResponseWriter, r *http.Request) {
-	var req struct{ Path, Mode string `json:"path"` }
+	var req struct {
+		Path string
+		Mode string `json:"path"`
+	}
 	if err := readJSON(r, &req); err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
@@ -269,7 +280,10 @@ func fsChmod(w http.ResponseWriter, r *http.Request) {
 }
 
 func fsTouch(w http.ResponseWriter, r *http.Request) {
-	var req struct{ Path, Mode string `json:"path"` }
+	var req struct {
+		Path string
+		Mode string `json:"path"`
+	}
 	if err := readJSON(r, &req); err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
@@ -288,7 +302,10 @@ func fsTouch(w http.ResponseWriter, r *http.Request) {
 }
 
 func fsSymlink(w http.ResponseWriter, r *http.Request) {
-	var req struct{ Target, Link string `json:"target"` }
+	var req struct {
+		Target string
+		Link   string `json:"target"`
+	}
 	if err := readJSON(r, &req); err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
@@ -387,7 +404,10 @@ func fsTruncate(w http.ResponseWriter, r *http.Request) {
 }
 
 func fsLink(w http.ResponseWriter, r *http.Request) {
-	var req struct{ Existing, Newpath string `json:"existing"` }
+	var req struct {
+		Existing string
+		Newpath  string `json:"existing"`
+	}
 	if err := readJSON(r, &req); err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
@@ -408,7 +428,9 @@ func fsLink(w http.ResponseWriter, r *http.Request) {
 }
 
 func fsRealpath(w http.ResponseWriter, r *http.Request) {
-	var req struct{ Path string `json:"path"` }
+	var req struct {
+		Path string `json:"path"`
+	}
 	if err := readJSON(r, &req); err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
@@ -426,7 +448,9 @@ func fsRealpath(w http.ResponseWriter, r *http.Request) {
 }
 
 func fsMkdtemp(w http.ResponseWriter, r *http.Request) {
-	var req struct{ Prefix string `json:"prefix"` }
+	var req struct {
+		Prefix string `json:"prefix"`
+	}
 	if err := readJSON(r, &req); err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
