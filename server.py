@@ -23,7 +23,7 @@ import signal as signal_module
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -98,12 +98,14 @@ async def auth_middleware(request: Request, call_next):
 class ExecRequest(BaseModel):
     cmd: str = ""                       # command string (shell=True) or argv[0] (shell=False)
     args: list[str] = Field(default_factory=list)  # argv[1:] when shell=False
-    shell: bool = True                  # True=exec/execSync (sh -c), False=execFile/spawn/fork
+    shell: Union[bool, str] = True     # True=sh -c, False=exec argv, str=use that shell -c
     cwd: str = "/"
     env: dict[str, str] = Field(default_factory=dict)
-    timeout: int = 30                   # seconds, enforced on BOTH sync and stream endpoints
+    timeout: int = 0                   # seconds (0 = no timeout); enforced on BOTH sync and stream
     stdin: Optional[str] = None         # one-shot stdin written before process runs
     binary: bool = False                # True → also return stdout_b64/stderr_b64 (binary-safe)
+    uid: Optional[int] = None           # drop to this uid before exec (requires root)
+    gid: Optional[int] = None           # drop to this gid before exec (requires root)
 
 
 class StdinRequest(BaseModel):
@@ -633,13 +635,26 @@ async def _proc_sweeper():
                 _proc_table.pop(pid, None)
 
 
+def _make_preexec(gid, uid):
+    """Build a preexec_fn that drops privileges (gid before uid). None if no-op."""
+    if gid is None and uid is None:
+        return None
+    def fn():
+        if gid is not None:
+            os.setgid(gid)
+        if uid is not None:
+            os.setuid(uid)
+    return fn
+
+
 async def _spawn(req: ExecRequest):
-    """Create the subprocess per req.shell (shell→sh -c, else exec argv), register it."""
+    """Create the subprocess per req.shell (True→sh -c, str→that shell -c, else exec argv)."""
     env = _build_env(req.env)
     cwd = _safe_cwd(req.cwd)
+    preexec = _make_preexec(req.gid, req.uid)
     # start_new_session=True puts the child in its own process group so timeout
     # and kill can take down the whole tree (sh -c "sleep 3" kills sleep too).
-    if req.shell:
+    if req.shell is True:
         label = req.cmd
         proc = await asyncio.create_subprocess_shell(
             req.cmd,
@@ -649,9 +664,13 @@ async def _spawn(req: ExecRequest):
             cwd=cwd,
             env=env,
             start_new_session=True,
+            preexec_fn=preexec,
         )
     else:
-        argv = [req.cmd] + list(req.args)
+        if isinstance(req.shell, str) and req.shell:
+            argv = [req.shell, "-c", req.cmd]
+        else:
+            argv = [req.cmd] + list(req.args)
         label = " ".join(argv)
         proc = await asyncio.create_subprocess_exec(
             *argv,
@@ -661,6 +680,7 @@ async def _spawn(req: ExecRequest):
             cwd=cwd,
             env=env,
             start_new_session=True,
+            preexec_fn=preexec,
         )
     _proc_register(proc, label)
     return proc
@@ -686,8 +706,14 @@ async def exec_command(req: ExecRequest):
         proc = await _spawn(req)
     except FileNotFoundError:
         return JSONResponse(status_code=404, content={
-            "error": "command not found", "cmd": req.cmd,
+            "error": "command not found", "error_code": "ENOENT", "cmd": req.cmd,
             "stdout": "", "stderr": "", "exit_code": -2, "pid": 0,
+            "duration_ms": int((time.monotonic() - start) * 1000),
+        })
+    except PermissionError:
+        return JSONResponse(status_code=403, content={
+            "error": "permission denied", "error_code": "EACCES", "cmd": req.cmd,
+            "stdout": "", "stderr": "", "exit_code": -13, "pid": 0,
             "duration_ms": int((time.monotonic() - start) * 1000),
         })
     pid = proc.pid
@@ -731,9 +757,13 @@ async def exec_stream(req: ExecRequest):
     async def generate():
         try:
             proc = await _spawn(req)
-        except FileNotFoundError as e:
-            yield f"data: {json.dumps({'type': 'error', 'data': f'command not found: {req.cmd}'})}\n\n"
+        except FileNotFoundError:
+            yield f"data: {json.dumps({'type': 'error', 'data': f'spawn {req.cmd} ENOENT', 'code': 'ENOENT'})}\n\n"
             yield f"data: {json.dumps({'type': 'exit', 'code': -2, 'signal': None, 'duration_ms': 0})}\n\n"
+            return
+        except PermissionError:
+            yield f"data: {json.dumps({'type': 'error', 'data': f'spawn {req.cmd} EACCES', 'code': 'EACCES'})}\n\n"
+            yield f"data: {json.dumps({'type': 'exit', 'code': -13, 'signal': None, 'duration_ms': 0})}\n\n"
             return
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'data': str(e)})}\n\n"
@@ -1024,24 +1054,33 @@ async def ws_exec(ws: WebSocket):
                 env = _build_env(req.env)
                 env.setdefault("TERM", "xterm-256color")
                 cwd = _safe_cwd(req.cwd)
-                if req.shell:
+                preexec = _make_preexec(req.gid, req.uid)
+                if req.shell is True:
                     proc = await asyncio.create_subprocess_shell(
                         req.cmd, stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
-                        cwd=cwd, env=env, start_new_session=True,
+                        cwd=cwd, env=env, start_new_session=True, preexec_fn=preexec,
                     )
                 else:
-                    argv = [req.cmd] + list(req.args)
+                    if isinstance(req.shell, str) and req.shell:
+                        argv = [req.shell, "-c", req.cmd]
+                    else:
+                        argv = [req.cmd] + list(req.args)
                     proc = await asyncio.create_subprocess_exec(
                         *argv, stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
-                        cwd=cwd, env=env, start_new_session=True,
+                        cwd=cwd, env=env, start_new_session=True, preexec_fn=preexec,
                     )
                 os.close(slave_fd)
                 _proc_register(proc, req.cmd)
             else:
                 proc = await _spawn(req)
         except FileNotFoundError:
-            await ws.send_json({"type": "error", "data": f"command not found: {req.cmd}"})
+            await ws.send_json({"type": "error", "data": f"spawn {req.cmd} ENOENT", "code": "ENOENT"})
             await ws.send_json({"type": "exit", "code": -2, "signal": None, "duration_ms": 0})
+            await ws.close()
+            return
+        except PermissionError:
+            await ws.send_json({"type": "error", "data": f"spawn {req.cmd} EACCES", "code": "EACCES"})
+            await ws.send_json({"type": "exit", "code": -13, "signal": None, "duration_ms": 0})
             await ws.close()
             return
         except Exception as e:
