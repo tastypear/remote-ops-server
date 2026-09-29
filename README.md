@@ -161,7 +161,7 @@ End-to-end test suites live in the client packages (remote-fs-node: 147 tests, r
 - [x] Python/FastAPI implementation (fs + exec + fd session)
 - [x] Stateful fd sessions (os.pread/os.pwrite, SFTP parity)
 - [x] Stream-backed exec with live-PID kill + process-group termination
-- [ ] WebSocket PTY support for interactive commands
+- [x] WebSocket PTY support for interactive commands
 - [ ] Go/Rust rewrite for production throughput
 
 ## License
