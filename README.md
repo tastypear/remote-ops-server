@@ -50,6 +50,7 @@ All endpoints except `/` and `/health` require `Authorization: Bearer <token>`.
 | POST | `/api/exec` | Execute command (sync) — returns `{stdout, stderr, exit_code, pid, duration_ms}` |
 | POST | `/api/exec/stream` | Execute command (SSE streaming) — `pid` → `stdout`/`stderr` → `exit` frames; keepalive on idle |
 | POST | `/api/exec/kill?pid=&signal_name=` | Kill a spawned process (ownership-checked, process-group `os.killpg`) |
+| GET | `/api/exec/status?pid=` | Check if a spawned process is still running (`{pid, running, exit_code, cmd, age_s}`) |
 | POST | `/api/exec/stdin` | Write to a spawned process's stdin `{pid, data, close}` |
 | WS | `/ws/exec` | Bidirectional exec — streaming stdin, binary-safe stdout/stderr (base64), kill, keepalive |
 
@@ -57,7 +58,7 @@ Request body: `{cmd, args, shell, cwd, env, timeout, stdin, binary}`. `shell:tru
 
 Server guarantees: process registry (every PID tracked, kill/stdin verify ownership), env sanitization (secrets like the auth token stripped from child env), timeout enforced on both sync and stream endpoints, SSE keepalive defeats proxy idle timeouts, orphan cleanup on client disconnect.
 
-**`/ws/exec`** covers two edge cases SSE can't: true streaming stdin (write → read → write, interactive) and binary-safe stdout/stderr. Auth via `Authorization: Bearer <token>` header (preferred) or `?token=` query param. JSON message protocol — see `ws_exec` docstring in `server.py` for the full frame reference. PTY mode (`{pty:true, cols, rows}` in the start message) spawns the child with a pseudo-terminal — echo, line editing, terminal control, and `resize` events work. Output is merged (stdout+stderr on one stream, as with any PTY).
+**`/ws/exec`** covers two edge cases SSE can't: true streaming stdin (write → read → write, interactive) and binary-safe stdout/stderr. Auth via `Authorization: Bearer <token>` header (preferred) or `?token=` query param. JSON message protocol — see `ws_exec` docstring in `server.py` for the full frame reference. PTY mode (`{pty:true, cols, rows}` in the start message) spawns the child with a pseudo-terminal — echo, line editing, terminal control, and `resize` events work. Output is merged (stdout+stderr on one stream, as with any PTY). Detach mode (`{detach:true}`) keeps the process alive after the WS disconnects — output is drained (discarded) in the background and the process stays in the registry for `GET /api/exec/status` or `POST /api/exec/kill`.
 
 ### File Descriptors (stateful fd session)
 

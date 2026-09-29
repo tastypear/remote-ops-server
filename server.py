@@ -552,7 +552,7 @@ async def root():
         "name": "remote-ops-server",
         "version": "0.1.0",
         "endpoints": {
-            "exec": ["POST /api/exec", "POST /api/exec/stream", "POST /api/exec/kill", "POST /api/exec/stdin", "WS /ws/exec"],
+            "exec": ["POST /api/exec", "POST /api/exec/stream", "POST /api/exec/kill", "GET /api/exec/status", "POST /api/exec/stdin", "WS /ws/exec"],
             "fs": [
                 "GET /api/fs/stat", "GET /api/fs/read", "PUT /api/fs/write",
                 "POST /api/fs/delete", "POST /api/fs/mkdir", "POST /api/fs/move",
@@ -844,6 +844,22 @@ async def exec_kill(pid: int = Query(...), signal_name: str = Query("SIGTERM")):
     return {"ok": ok, "pid": pid, "signal": sig_name}
 
 
+@app.get("/api/exec/status")
+async def exec_status(pid: int = Query(...)):
+    """Check if a spawned process is still running. Ownership-checked against _proc_table."""
+    entry = _proc_get(pid)
+    if not entry:
+        return JSONResponse(status_code=404, content={"error": "no such process", "pid": pid})
+    proc = entry["proc"]
+    return {
+        "pid": pid,
+        "running": proc.returncode is None,
+        "exit_code": proc.returncode,
+        "cmd": entry["cmd"],
+        "age_s": int(time.monotonic() - entry["spawn_time"]),
+    }
+
+
 @app.post("/api/exec/stdin")
 async def exec_stdin(req: StdinRequest):
     """Write to a spawned process's stdin (攒-end: write data, optionally close)."""
@@ -909,6 +925,39 @@ def _pty_set_winsize(fd: int, rows: int, cols: int) -> None:
     fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
 
 
+async def _drain_proc(proc, master_fd, use_pty, pid):
+    """Drain output from a detached process until it exits, then unregister."""
+    try:
+        if use_pty and master_fd is not None:
+            loop = asyncio.get_event_loop()
+            while True:
+                try:
+                    chunk = await loop.run_in_executor(None, os.read, master_fd, CHUNK_SIZE)
+                except OSError as e:
+                    if e.errno == errno.EIO:
+                        break
+                    raise
+                if not chunk:
+                    break
+        else:
+            async def drain_stream(stream):
+                while True:
+                    chunk = await stream.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+            await asyncio.gather(drain_stream(proc.stdout), drain_stream(proc.stderr))
+        await proc.wait()
+    except Exception:
+        pass
+    finally:
+        if use_pty and master_fd is not None:
+            try:
+                os.close(master_fd)
+            except Exception:
+                pass
+        _proc_unregister(pid)
+
+
 @app.websocket("/ws/exec")
 async def ws_exec(ws: WebSocket):
     global _ws_connections
@@ -939,6 +988,7 @@ async def ws_exec(ws: WebSocket):
         req = ExecRequest(**{k: v for k, v in msg.items() if k in known})
 
         use_pty = bool(msg.get("pty"))
+        detachable = bool(msg.get("detach"))
         master_fd = None
 
         try:
@@ -1088,7 +1138,8 @@ async def ws_exec(ws: WebSocket):
                             except Exception:
                                 pass
             except WebSocketDisconnect:
-                _kill_proc(proc)
+                if not detachable:
+                    _kill_proc(proc)
             except Exception:
                 pass
 
@@ -1115,47 +1166,58 @@ async def ws_exec(ws: WebSocket):
                 else:
                     _proc_touch(pid)
                     await ws.send_json(item)
-        except (WebSocketDisconnect, asyncio.CancelledError):
+        except WebSocketDisconnect:
+            if not detachable:
+                _kill_proc(proc)
+            raise
+        except asyncio.CancelledError:
             _kill_proc(proc)
             raise
         finally:
             stdin_task.cancel()
             if timed_out:
                 _kill_proc(proc)
-            await asyncio.gather(*reader_tasks, return_exceptions=True)
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=5)
-            except Exception:
-                pass
-            try:
-                if not use_pty and proc.stdin and not proc.stdin.is_closing():
-                    proc.stdin.close()
-            except Exception:
-                pass
-            if use_pty and master_fd is not None:
+            # Detach: keep the proc alive, drain output in the background.
+            if detachable and proc.returncode is None and not timed_out:
+                for t in reader_tasks:
+                    t.cancel()
+                await asyncio.gather(*reader_tasks, return_exceptions=True)
+                asyncio.create_task(_drain_proc(proc, master_fd, use_pty, pid))
+            else:
+                await asyncio.gather(*reader_tasks, return_exceptions=True)
                 try:
-                    os.close(master_fd)
+                    await asyncio.wait_for(proc.wait(), timeout=5)
                 except Exception:
                     pass
-            _proc_unregister(pid)
+                try:
+                    if not use_pty and proc.stdin and not proc.stdin.is_closing():
+                        proc.stdin.close()
+                except Exception:
+                    pass
+                if use_pty and master_fd is not None:
+                    try:
+                        os.close(master_fd)
+                    except Exception:
+                        pass
+                _proc_unregister(pid)
 
-            duration_ms = int((time.monotonic() - start) * 1000)
-            code = proc.returncode
-            signal_name = "SIGKILL" if timed_out else None
-            try:
-                await ws.send_json({
-                    "type": "exit",
-                    "code": code,
-                    "signal": signal_name,
-                    "duration_ms": duration_ms,
-                })
-            except Exception:
-                pass
+                duration_ms = int((time.monotonic() - start) * 1000)
+                code = proc.returncode
+                signal_name = "SIGKILL" if timed_out else None
+                try:
+                    await ws.send_json({
+                        "type": "exit",
+                        "code": code,
+                        "signal": signal_name,
+                        "duration_ms": duration_ms,
+                    })
+                except Exception:
+                    pass
 
     except WebSocketDisconnect:
-        if proc:
+        if proc and not detachable:
             _kill_proc(proc)
-        if pid is not None:
+        if pid is not None and not detachable:
             _proc_unregister(pid)
     except Exception as e:
         try:
