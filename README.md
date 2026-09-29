@@ -56,7 +56,7 @@ All endpoints except `/` and `/health` require `Authorization: Bearer <token>`.
 
 Request body: `{cmd, args, shell, cwd, env, timeout, stdin, binary}`. `shell:true` runs `sh -c` (for `exec`); `shell:false` passes args as argv (for `spawn`/`execFile`/`fork`, no injection). `binary:true` makes `/api/exec` also return `stdout_b64`/`stderr_b64` (base64 of raw bytes) alongside the decoded strings — lets sync callers avoid `errors="replace"` corruption.
 
-Server guarantees: process registry (every PID tracked, kill/stdin verify ownership), env sanitization (secrets like the auth token stripped from child env), timeout enforced on both sync and stream endpoints, SSE keepalive defeats proxy idle timeouts, orphan cleanup on client disconnect.
+Server guarantees: process registry (every PID tracked, kill/stdin verify ownership), env sanitization (secrets like the auth token stripped from child env), timeout enforced on both sync and stream endpoints, SSE keepalive defeats proxy idle timeouts, orphan cleanup on client disconnect, graceful server shutdown kills all tracked processes and closes all tracked fds.
 
 **`/ws/exec`** covers two edge cases SSE can't: true streaming stdin (write → read → write, interactive) and binary-safe stdout/stderr. Auth via `Authorization: Bearer <token>` header (preferred) or `?token=` query param. JSON message protocol — see `ws_exec` docstring in `server.py` for the full frame reference. PTY mode (`{pty:true, cols, rows}` in the start message) spawns the child with a pseudo-terminal — echo, line editing, terminal control, and `resize` events work. Output is merged (stdout+stderr on one stream, as with any PTY). Detach mode (`{detach:true}`) keeps the process alive after the WS disconnects — output is drained (discarded) in the background and the process stays in the registry for `GET /api/exec/status` or `POST /api/exec/kill`. Binary frames (`{binaryFrames:true}`) send stdout/stderr as WS binary frames (1-byte prefix + raw bytes) instead of JSON+base64, eliminating the 33% base64 overhead.
 
@@ -75,7 +75,7 @@ Server guarantees: process registry (every PID tracked, kill/stdin verify owners
 | POST | `/api/fs/fd/fchown` | fchown `{fd, uid, gid}` |
 | POST | `/api/fs/fd/futimes` | futimes `{fd, atime, mtime}` |
 
-Stateful fd sessions enable O(1) ranged I/O (SFTP parity) — no whole-file buffering per operation. Background sweeper reaps idle fds (300s) and processes (1800s).
+Stateful fd sessions enable O(1) ranged I/O (SFTP parity) — no whole-file buffering per operation. Background sweeper reaps idle fds (300s) and processes (300s).
 
 ### File Operations (SFTP replacement)
 

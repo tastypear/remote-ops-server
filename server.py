@@ -51,6 +51,23 @@ async def lifespan(app):
     finally:
         fd_task.cancel()
         proc_task.cancel()
+        # Kill all tracked processes on shutdown — the server is going away
+        # and can't manage them after restart (proc_table isn't persisted).
+        # This covers the gap where a sync /api/exec or detached proc would
+        # otherwise be orphaned when the request is cancelled by shutdown.
+        for _pid, entry in list(_proc_table.items()):
+            try:
+                _kill_proc(entry["proc"])
+            except Exception:
+                pass
+        _proc_table.clear()
+        # Close all tracked file descriptors.
+        for _fd, entry in list(_fd_table.items()):
+            try:
+                os.close(entry["osfd"])
+            except Exception:
+                pass
+        _fd_table.clear()
 
 
 app = FastAPI(title="remote-ops-server", version="0.1.0", lifespan=lifespan)
@@ -950,6 +967,13 @@ async def _drain_proc(proc, master_fd, use_pty, pid):
     except Exception:
         pass
     finally:
+        # If the proc is still alive (e.g., drain task cancelled on server
+        # shutdown), kill it before unregistering so it's not orphaned.
+        if proc.returncode is None:
+            try:
+                _kill_proc(proc)
+            except Exception:
+                pass
         if use_pty and master_fd is not None:
             try:
                 os.close(master_fd)
