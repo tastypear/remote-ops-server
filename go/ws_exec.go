@@ -89,7 +89,9 @@ func wsExec(w http.ResponseWriter, r *http.Request) {
 
 	if usePty {
 		c = buildCmd(&req)
-		c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		// Preserve credential (uid/gid) from buildCmd; PTY needs Setsid.
+		cred := c.SysProcAttr.Credential
+		c.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Credential: cred}
 		m, err := pty.Start(c)
 		if err != nil {
 			code := spawnErrCode(err)

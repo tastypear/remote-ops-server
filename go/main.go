@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -82,15 +83,19 @@ func main() {
 	}
 	handler = authMiddleware(handler)
 
-	srv := &http.Server{Addr: listenAddr, Handler: handler}
+	srv := &http.Server{Handler: handler}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	go func() {
 		log.Printf("remote-ops-server starting on %s", listenAddr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		ln, err := net.Listen("tcp4", listenAddr)
+		if err != nil {
 			log.Fatalf("listen: %v", err)
+		}
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("serve: %v", err)
 		}
 	}()
 

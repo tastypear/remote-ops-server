@@ -82,7 +82,7 @@ func buildCmd(req *execRequest) *exec.Cmd {
 		if req.GID != nil {
 			gid = uint32(*req.GID)
 		}
-		attr.Credential = &syscall.Credential{Uid: uid, Gid: gid}
+		attr.Credential = &syscall.Credential{Uid: uid, Gid: gid, NoSetGroups: true}
 	}
 	c.SysProcAttr = attr
 	return c
