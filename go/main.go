@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -16,11 +17,30 @@ import (
 
 var (
 	apiToken   = getenv("REMOTE_OPS_TOKEN", "dev-token-change-me")
-	listenAddr = getenv("REMOTE_OPS_HOST", "0.0.0.0") + ":" + getenv("REMOTE_OPS_PORT", "8765")
+	listenHost = getenv("REMOTE_OPS_HOST", "0.0.0.0")
+	listenPort = getenv("REMOTE_OPS_PORT", "8765")
 	enableCORS = getenv("REMOTE_OPS_CORS", "false") == "true"
 	wsMaxConn  = getenvInt("REMOTE_OPS_WS_MAX_CONN", 64)
 	chunkSize  = 65536
 )
+
+// listenNetwork returns "tcp4" for IPv4 hosts (incl. 0.0.0.0) and "tcp6" for
+// IPv6 hosts (incl. ::). This avoids Go binding 0.0.0.0 to IPv6-only on some
+// systems (WSL2), while supporting pure-IPv6 servers via REMOTE_OPS_HOST=::.
+func listenNetwork() string {
+	if strings.Contains(listenHost, ":") {
+		return "tcp6"
+	}
+	return "tcp4"
+}
+
+// listenAddress formats host:port, bracketing IPv6 addresses.
+func listenAddress() string {
+	if strings.Contains(listenHost, ":") {
+		return "[" + listenHost + "]:" + listenPort
+	}
+	return listenHost + ":" + listenPort
+}
 
 func getenv(k, d string) string {
 	if v := os.Getenv(k); v != "" {
@@ -89,8 +109,9 @@ func main() {
 	defer stop()
 
 	go func() {
-		log.Printf("remote-ops-server starting on %s", listenAddr)
-		ln, err := net.Listen("tcp4", listenAddr)
+		addr := listenAddress()
+		log.Printf("remote-ops-server starting on %s", addr)
+		ln, err := net.Listen(listenNetwork(), addr)
 		if err != nil {
 			log.Fatalf("listen: %v", err)
 		}
