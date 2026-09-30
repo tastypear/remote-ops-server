@@ -162,7 +162,7 @@ End-to-end test suites live in the client packages (remote-fs-node: 147 tests, r
 - [x] Stateful fd sessions (os.pread/os.pwrite, SFTP parity)
 - [x] Stream-backed exec with live-PID kill + process-group termination
 - [x] WebSocket PTY support for interactive commands
-- [ ] Go/Rust rewrite for production throughput
+- [x] Go rewrite for production throughput (`go/` — all 44 endpoints, PTY, WS, detach)
 
 ## License
 
