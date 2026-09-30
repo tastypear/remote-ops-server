@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
 
 func fsError(w http.ResponseWriter, err error) {
@@ -181,8 +182,8 @@ func fsMkdir(w http.ResponseWriter, r *http.Request) {
 
 func fsMove(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Src string
-		Dst string `json:"src"`
+		Src string `json:"src"`
+		Dst string `json:"dst"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
@@ -200,8 +201,8 @@ func fsMove(w http.ResponseWriter, r *http.Request) {
 
 func fsCopy(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Src string
-		Dst string `json:"src"`
+		Src string `json:"src"`
+		Dst string `json:"dst"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
@@ -240,7 +241,9 @@ func copyDir(src, dst string) error {
 			}
 		} else {
 			info, _ := e.Info()
-			copyFile(s, d, info)
+			if err := copyFile(s, d, info); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -257,8 +260,13 @@ func copyFile(src, dst string, info os.FileInfo) error {
 		return err
 	}
 	defer out.Close()
-	io.Copy(out, in)
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
 	out.Chmod(info.Mode())
+	if st, ok := info.Sys().(*syscall.Stat_t); ok {
+		os.Chtimes(dst, time.Unix(st.Atim.Sec, st.Atim.Nsec), time.Unix(st.Mtim.Sec, st.Mtim.Nsec))
+	}
 	return nil
 }
 
