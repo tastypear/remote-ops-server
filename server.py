@@ -716,6 +716,12 @@ async def exec_command(req: ExecRequest):
             "stdout": "", "stderr": "", "exit_code": -13, "pid": 0,
             "duration_ms": int((time.monotonic() - start) * 1000),
         })
+    except OSError as e:
+        return JSONResponse(status_code=400, content={
+            "error": e.strerror or str(e), "error_code": "E2BIG" if e.errno == 7 else "EOTHER",
+            "cmd": req.cmd[:200], "stdout": "", "stderr": "", "exit_code": -19, "pid": 0,
+            "duration_ms": int((time.monotonic() - start) * 1000),
+        })
     pid = proc.pid
     try:
         stdout_b, stderr_b = await asyncio.wait_for(
@@ -1452,7 +1458,11 @@ async def fs_copy(req: MoveCopyRequest):
 
 @app.post("/api/fs/chmod")
 async def fs_chmod(req: ChmodRequest):
-    await _run_fs(os.chmod, req.path, int(req.mode, 8))
+    try:
+        mode_val = int(req.mode, 8)
+    except (ValueError, TypeError):
+        raise HTTPException(400, f"invalid mode: {req.mode}")
+    await _run_fs(os.chmod, req.path, mode_val)
     return {"ok": True, "path": req.path, "mode": req.mode}
 
 
@@ -1798,13 +1808,14 @@ async def which(cmd: str = Query(...)):
 
 @app.get("/api/env")
 async def get_env():
+    safe_env = {k: v for k, v in os.environ.items() if not k.startswith("REMOTE_OPS_")}
     return {
         "python": sys.version,
         "platform": platform.platform(),
         "hostname": socket.gethostname(),
         "cwd": os.getcwd(),
         "uid": os.getuid() if hasattr(os, "getuid") else "n/a",
-        "env": dict(os.environ),
+        "env": safe_env,
     }
 
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -23,11 +24,16 @@ func fsError(w http.ResponseWriter, err error) {
 }
 
 func parseOctal(s string) (os.FileMode, error) {
+	s = strings.TrimPrefix(strings.TrimPrefix(s, "0o"), "0O")
+	if s == "" {
+		return 0, fmt.Errorf("invalid mode")
+	}
 	var m uint64
 	for _, c := range s {
-		if c >= '0' && c <= '7' {
-			m = m*8 + uint64(c-'0')
+		if c < '0' || c > '7' {
+			return 0, fmt.Errorf("invalid mode: %q", s)
 		}
+		m = m*8 + uint64(c-'0')
 	}
 	return os.FileMode(m), nil
 }
@@ -117,7 +123,11 @@ func fsWrite(w http.ResponseWriter, r *http.Request) {
 	f.Write(body)
 	f.Close()
 	if mode != "" {
-		m, _ := parseOctal(mode)
+		m, mErr := parseOctal(mode)
+		if mErr != nil {
+			writeJSON(w, 400, map[string]any{"error": mErr.Error()})
+			return
+		}
 		os.Chmod(path, m)
 	}
 	if flush {
@@ -163,13 +173,22 @@ func fsMkdir(w http.ResponseWriter, r *http.Request) {
 	if req.Recursive {
 		err = os.MkdirAll(req.Path, 0755)
 		if err == nil && req.Mode != "" {
-			m, _ := parseOctal(req.Mode)
+			m, mErr := parseOctal(req.Mode)
+			if mErr != nil {
+				writeJSON(w, 400, map[string]any{"error": mErr.Error()})
+				return
+			}
 			os.Chmod(req.Path, m)
 		}
 	} else {
 		m := os.FileMode(0755)
 		if req.Mode != "" {
-			m, _ = parseOctal(req.Mode)
+			var mErr error
+			m, mErr = parseOctal(req.Mode)
+			if mErr != nil {
+				writeJSON(w, 400, map[string]any{"error": mErr.Error()})
+				return
+			}
 		}
 		err = os.Mkdir(req.Path, m)
 	}
@@ -279,7 +298,11 @@ func fsChmod(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
 	}
-	m, _ := parseOctal(req.Mode)
+	m, err := parseOctal(req.Mode)
+	if err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
 	if err := os.Chmod(req.Path, m); err != nil {
 		fsError(w, err)
 		return
@@ -303,7 +326,11 @@ func fsTouch(w http.ResponseWriter, r *http.Request) {
 	}
 	f.Close()
 	if req.Mode != "" {
-		m, _ := parseOctal(req.Mode)
+		m, mErr := parseOctal(req.Mode)
+		if mErr != nil {
+			writeJSON(w, 400, map[string]any{"error": mErr.Error()})
+			return
+		}
 		os.Chmod(req.Path, m)
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "path": req.Path})

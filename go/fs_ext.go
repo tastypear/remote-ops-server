@@ -204,8 +204,10 @@ func fsBatch(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			if op.Mode != "" {
-				m, _ := parseOctal(op.Mode)
-				os.Chmod(op.Path, m)
+				m, mErr := parseOctal(op.Mode)
+				if mErr == nil {
+					os.Chmod(op.Path, m)
+				}
 			}
 			results = append(results, map[string]any{"op": op.Op, "path": op.Path, "ok": true})
 		case "delete":
@@ -214,8 +216,10 @@ func fsBatch(w http.ResponseWriter, r *http.Request) {
 		case "mkdir":
 			os.MkdirAll(op.Path, 0755)
 			if op.Mode != "" {
-				m, _ := parseOctal(op.Mode)
-				os.Chmod(op.Path, m)
+				m, mErr := parseOctal(op.Mode)
+				if mErr == nil {
+					os.Chmod(op.Path, m)
+				}
 			}
 			results = append(results, map[string]any{"op": op.Op, "path": op.Path, "ok": true})
 		case "move":
@@ -271,7 +275,7 @@ func envHandler(w http.ResponseWriter, r *http.Request) {
 	env := map[string]string{}
 	for _, e := range os.Environ() {
 		parts := strings.SplitN(e, "=", 2)
-		if len(parts) == 2 {
+		if len(parts) == 2 && !strings.HasPrefix(parts[0], "REMOTE_OPS_") {
 			env[parts[0]] = parts[1]
 		}
 	}

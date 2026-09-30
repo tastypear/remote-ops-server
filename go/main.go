@@ -145,7 +145,7 @@ func main() {
 }
 
 func registerRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /", rootHandler)
+	mux.HandleFunc("GET /{$}", rootHandler)
 	mux.HandleFunc("GET /health", healthHandler)
 
 	// exec
