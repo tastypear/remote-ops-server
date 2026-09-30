@@ -246,8 +246,8 @@ func fdFutimes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tv := []syscall.Timeval{
-		{Sec: req.ATime / 1000, Usec: int64(req.ATime % 1000 * 1000)},
-		{Sec: req.MTime / 1000, Usec: int64(req.MTime % 1000 * 1000)},
+		syscall.NsecToTimeval(req.ATime * 1000000),
+		syscall.NsecToTimeval(req.MTime * 1000000),
 	}
 	if err := syscall.Futimes(int(e.osfd.Fd()), tv); err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
