@@ -284,7 +284,7 @@ func copyFile(src, dst string, info os.FileInfo) error {
 	}
 	out.Chmod(info.Mode())
 	if st, ok := info.Sys().(*syscall.Stat_t); ok {
-		os.Chtimes(dst, time.Unix(st.Atim.Sec, st.Atim.Nsec), time.Unix(st.Mtim.Sec, st.Mtim.Nsec))
+		os.Chtimes(dst, time.Unix(int64(st.Atim.Sec), int64(st.Atim.Nsec)), time.Unix(int64(st.Mtim.Sec), int64(st.Mtim.Nsec)))
 	}
 	return nil
 }
