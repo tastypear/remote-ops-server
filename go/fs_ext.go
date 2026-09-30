@@ -69,11 +69,10 @@ func fsList(w http.ResponseWriter, r *http.Request) {
 				entries = append(entries, map[string]any{"name": n.Name(), "type": "unknown"})
 				continue
 			}
-			mode := uint32(st.Mode())
 			t := "file"
-			if (mode & syscall.S_IFMT) == syscall.S_IFDIR {
+			if st.IsDir() {
 				t = "dir"
-			} else if (mode & syscall.S_IFMT) == syscall.S_IFLNK {
+			} else if st.Mode()&os.ModeSymlink != 0 {
 				t = "symlink"
 			}
 			entries = append(entries, map[string]any{"name": n.Name(), "type": t, "size": st.Size(), "mode": formatOctal(st.Mode() & 0777)})
@@ -106,14 +105,14 @@ func fsGlob(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			continue
 		}
-		mode := uint32(st.Mode())
 		t := "file"
-		if (mode & syscall.S_IFMT) == syscall.S_IFDIR {
+		if st.IsDir() {
 			t = "dir"
-		} else if (mode & syscall.S_IFMT) == syscall.S_IFLNK {
+		} else if st.Mode()&os.ModeSymlink != 0 {
 			t = "symlink"
 		}
-		result = append(result, map[string]any{"path": m, "type": t})
+		rel, _ := filepath.Rel(base, m)
+		result = append(result, map[string]any{"path": rel, "type": t})
 	}
 	writeJSON(w, 200, result)
 }
@@ -121,9 +120,9 @@ func fsGlob(w http.ResponseWriter, r *http.Request) {
 func globRecursive(pattern, base string) []string {
 	var result []string
 	root := base
-	sep := strings.Index(pattern, "**")
-	if sep >= 0 {
-		rootPart := pattern[:sep]
+	idx := strings.Index(pattern, "**")
+	if idx >= 0 {
+		rootPart := strings.TrimSuffix(pattern[:idx], "/")
 		if rootPart != "" {
 			root = filepath.Join(base, rootPart)
 		}
@@ -133,16 +132,45 @@ func globRecursive(pattern, base string) []string {
 			return nil
 		}
 		rel, err := filepath.Rel(base, path)
-		if err != nil {
+		if err != nil || rel == "." {
 			return nil
 		}
-		matched, _ := filepath.Match(strings.ReplaceAll(pattern, "**/", ""), rel)
-		if matched {
+		if globMatch(pattern, rel) {
 			result = append(result, path)
 		}
 		return nil
 	})
 	return result
+}
+
+func globMatch(pattern, name string) bool {
+	idx := strings.Index(pattern, "**")
+	if idx < 0 {
+		matched, _ := filepath.Match(pattern, name)
+		return matched
+	}
+	prefix := strings.TrimSuffix(pattern[:idx], "/")
+	suffix := strings.TrimPrefix(pattern[idx+2:], "/")
+	if prefix != "" {
+		if name == prefix {
+			return suffix == ""
+		}
+		if !strings.HasPrefix(name, prefix+"/") {
+			return false
+		}
+		name = name[len(prefix)+1:]
+	}
+	if suffix == "" {
+		return true
+	}
+	parts := strings.Split(name, "/")
+	for i := 0; i < len(parts); i++ {
+		sub := strings.Join(parts[i:], "/")
+		if matched, _ := filepath.Match(suffix, sub); matched {
+			return true
+		}
+	}
+	return false
 }
 
 func fsBatch(w http.ResponseWriter, r *http.Request) {

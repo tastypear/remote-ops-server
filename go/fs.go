@@ -272,8 +272,8 @@ func copyFile(src, dst string, info os.FileInfo) error {
 
 func fsChmod(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Path string
-		Mode string `json:"path"`
+		Path string `json:"path"`
+		Mode string `json:"mode"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
@@ -289,8 +289,8 @@ func fsChmod(w http.ResponseWriter, r *http.Request) {
 
 func fsTouch(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Path string
-		Mode string `json:"path"`
+		Path string `json:"path"`
+		Mode string `json:"mode"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
@@ -311,8 +311,8 @@ func fsTouch(w http.ResponseWriter, r *http.Request) {
 
 func fsSymlink(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Target string
-		Link   string `json:"target"`
+		Target string `json:"target"`
+		Link   string `json:"link"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
@@ -413,8 +413,8 @@ func fsTruncate(w http.ResponseWriter, r *http.Request) {
 
 func fsLink(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Existing string
-		Newpath  string `json:"existing"`
+		Existing string `json:"existing"`
+		Newpath  string `json:"newpath"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
@@ -467,7 +467,12 @@ func fsMkdtemp(w http.ResponseWriter, r *http.Request) {
 	if strings.HasSuffix(prefix, "XXXXXX") {
 		prefix = prefix[:len(prefix)-6]
 	}
-	dir, err := os.MkdirTemp("", prefix)
+	tmpDir, pattern := "", prefix
+	if idx := strings.LastIndex(prefix, "/"); idx >= 0 {
+		tmpDir = prefix[:idx]
+		pattern = prefix[idx+1:]
+	}
+	dir, err := os.MkdirTemp(tmpDir, pattern)
 	if err != nil {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
