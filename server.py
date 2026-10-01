@@ -393,6 +393,11 @@ class FdUtimesRequest(BaseModel):
 @app.post("/api/fs/fd/open")
 async def fd_open(req: FdOpenRequest):
     def _do():
+        # Auto-create parent dirs when creating a file (matches /api/fs/write behavior).
+        if req.flags & os.O_CREAT:
+            parent = os.path.dirname(req.path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
         # O_CLOEXEC so the fd doesn't leak to child processes (e.g. exec endpoints).
         osfd = os.open(req.path, req.flags | os.O_CLOEXEC, req.mode)
         st = os.fstat(osfd)

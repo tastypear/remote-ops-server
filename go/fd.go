@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"syscall"
 	"time"
 )
@@ -34,6 +35,12 @@ func fdOpen(w http.ResponseWriter, r *http.Request) {
 		req.Mode = 0666
 	}
 	flag := req.Flags | syscall.O_CLOEXEC
+	// Auto-create parent dirs when creating a file (matches /api/fs/write behavior).
+	if req.Flags&syscall.O_CREAT != 0 {
+		if parent := path.Dir(req.Path); parent != "" && parent != "." {
+			os.MkdirAll(parent, 0755)
+		}
+	}
 	osfd, err := syscall.Open(req.Path, flag, uint32(req.Mode))
 	if err != nil {
 		fsError(w, err)
