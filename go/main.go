@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log"
@@ -17,19 +18,20 @@ import (
 
 var (
 	apiToken   = getenv("REMOTE_OPS_TOKEN", "dev-token-change-me")
-	listenHost = getenv("REMOTE_OPS_HOST", "0.0.0.0")
+	listenHost = getenv("REMOTE_OPS_HOST", "::") // IPv6 any → dual-stack (also accepts IPv4)
 	listenPort = getenv("REMOTE_OPS_PORT", "8765")
 	enableCORS = getenv("REMOTE_OPS_CORS", "false") == "true"
+	debugMode  = getenv("REMOTE_OPS_DEBUG", "false") == "true"
 	wsMaxConn  = getenvInt("REMOTE_OPS_WS_MAX_CONN", 64)
 	chunkSize  = 65536
 )
 
-// listenNetwork returns "tcp4" for IPv4 hosts (incl. 0.0.0.0) and "tcp6" for
-// IPv6 hosts (incl. ::). This avoids Go binding 0.0.0.0 to IPv6-only on some
-// systems (WSL2), while supporting pure-IPv6 servers via REMOTE_OPS_HOST=::.
+// listenNetwork returns "tcp4" for IPv4 hosts (incl. 0.0.0.0) and "tcp" for
+// IPv6 hosts (incl. ::). "tcp" with an IPv6 address creates a dual-stack socket
+// that accepts both IPv4 and IPv6 connections. "tcp6" would be IPv6-only.
 func listenNetwork() string {
 	if strings.Contains(listenHost, ":") {
-		return "tcp6"
+		return "tcp"
 	}
 	return "tcp4"
 }
@@ -102,6 +104,7 @@ func main() {
 		handler = corsMiddleware(handler)
 	}
 	handler = authMiddleware(handler)
+	handler = accessLogMiddleware(handler)
 
 	srv := &http.Server{Handler: handler}
 
@@ -240,5 +243,45 @@ func corsMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		next.ServeHTTP(w, r)
+	})
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(status int) {
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func accessLogMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+
+		var bodyBytes []byte
+		if debugMode && (r.Method == "POST" || r.Method == "PUT" || r.Method == "PATCH") {
+			bodyBytes, _ = io.ReadAll(r.Body)
+			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		}
+
+		wrapped := &statusWriter{ResponseWriter: w, status: 200}
+		next.ServeHTTP(wrapped, r)
+
+		duration := time.Since(start)
+		path := r.URL.Path
+		if r.URL.RawQuery != "" {
+			path += "?" + r.URL.RawQuery
+		}
+		if debugMode && len(bodyBytes) > 0 {
+			preview := string(bodyBytes)
+			if len(preview) > 500 {
+				preview = preview[:500]
+			}
+			log.Printf("%s %s %d %dms body=%s", r.Method, path, wrapped.status, duration.Milliseconds(), preview)
+		} else {
+			log.Printf("%s %s %d %dms", r.Method, path, wrapped.status, duration.Milliseconds())
+		}
 	})
 }

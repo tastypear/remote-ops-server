@@ -32,11 +32,12 @@ from pydantic import BaseModel, Field
 
 # ─── Config ──────────────────────────────────────────────────────────────
 API_TOKEN = os.environ.get("REMOTE_OPS_TOKEN", "dev-token-change-me")
-HOST = os.environ.get("REMOTE_OPS_HOST", "0.0.0.0")
+HOST = os.environ.get("REMOTE_OPS_HOST", "::")  # IPv6 any → dual-stack (also accepts IPv4)
 PORT = int(os.environ.get("REMOTE_OPS_PORT", "8765"))
 CHUNK_SIZE = 65536  # 64 KB read chunks
 ENABLE_CORS = os.environ.get("REMOTE_OPS_CORS", "false").lower() == "true"
 WS_MAX_CONN = int(os.environ.get("REMOTE_OPS_WS_MAX_CONN", "64"))  # concurrent WS exec sessions
+DEBUG = os.environ.get("REMOTE_OPS_DEBUG", "false").lower() == "true"
 
 
 # Lifespan: starts the fd-table and process-table background sweepers on
@@ -92,6 +93,36 @@ async def auth_middleware(request: Request, call_next):
     if token != API_TOKEN:
         return JSONResponse(status_code=401, content={"error": "unauthorized"})
     return await call_next(request)
+
+
+@app.middleware("http")
+async def access_log_middleware(request: Request, call_next):
+    start = time.time()
+
+    # In debug mode, capture request body for logging (POST/PUT/PATCH only).
+    body_bytes = b""
+    if DEBUG and request.method in ("POST", "PUT", "PATCH"):
+        body_bytes = await request.body()
+        # Make body re-readable for downstream handlers.
+        async def receive():
+            return {"type": "http.request", "body": body_bytes, "more_body": False}
+        request._receive = receive
+
+    response = await call_next(request)
+    duration_ms = (time.time() - start) * 1000
+
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    path = request.url.path
+    if request.url.query:
+        path += f"?{request.url.query}"
+
+    line = f"{ts} {request.method} {path} {response.status_code} {duration_ms:.0f}ms"
+    if DEBUG and body_bytes:
+        preview = body_bytes[:500].decode("utf-8", errors="replace")
+        line += f" body={preview}"
+    print(line, flush=True)
+
+    return response
 
 
 # ─── Pydantic models ─────────────────────────────────────────────────────
@@ -1823,4 +1854,19 @@ async def get_env():
 if __name__ == "__main__":
     print(f"remote-ops-server starting on {HOST}:{PORT}")
     print(f"Auth token: {API_TOKEN}")
-    uvicorn.run(app, host=HOST, port=PORT, log_level="info")
+    print(f"Debug mode: {DEBUG}")
+
+    # For IPv6 hosts (::), create a dual-stack socket that also accepts IPv4.
+    # Python/asyncio defaults to IPV6_V6ONLY=1 on some systems (WSL2), which
+    # rejects IPv4 connections. Explicitly setting IPV6_V6ONLY=0 enables both.
+    socks = None
+    if ":" in HOST:
+        sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((HOST, PORT))
+        sock.listen(128)
+        socks = [sock]
+
+    config = uvicorn.Config(app, host=HOST, port=PORT, log_level="info", access_log=False)
+    uvicorn.Server(config).run(sockets=socks)
