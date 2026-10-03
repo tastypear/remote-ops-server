@@ -104,46 +104,84 @@ if ENABLE_CORS:
     )
 
 
-# ─── Auth ────────────────────────────────────────────────────────────────
-@app.middleware("http")
-async def auth_middleware(request: Request, call_next):
-    if request.url.path in ("/", "/health"):
-        return await call_next(request)
-    auth = request.headers.get("Authorization", "")
-    token = auth[7:] if auth.startswith("Bearer ") else auth
-    if token != API_TOKEN:
-        return JSONResponse(status_code=401, content={"error": "unauthorized"})
-    return await call_next(request)
+# ─── Auth + Access Log (pure ASGI middleware) ──────────────────────────
+# NOTE: Do NOT use @app.middleware("http") — it adds BaseHTTPMiddleware,
+# which wraps streaming responses in a task group that doesn't clean up
+# when the generator exits, causing uvicorn to hang on shutdown.
+class AuthMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        path = scope["path"]
+        if path in ("/", "/health"):
+            await self.app(scope, receive, send)
+            return
+        headers = dict(scope.get("headers", []))
+        auth = headers.get(b"authorization", b"").decode("utf-8", errors="replace")
+        token = auth[7:] if auth.startswith("Bearer ") else auth
+        if token != API_TOKEN:
+            resp = JSONResponse(status_code=401, content={"error": "unauthorized"})
+            await resp(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
 
 
-@app.middleware("http")
-async def access_log_middleware(request: Request, call_next):
-    start = time.time()
+class AccessLogMiddleware:
+    def __init__(self, app):
+        self.app = app
 
-    # In debug mode, capture request body for logging (POST/PUT/PATCH only).
-    body_bytes = b""
-    if DEBUG and request.method in ("POST", "PUT", "PATCH"):
-        body_bytes = await request.body()
-        # Make body re-readable for downstream handlers.
-        async def receive():
-            return {"type": "http.request", "body": body_bytes, "more_body": False}
-        request._receive = receive
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
 
-    response = await call_next(request)
-    duration_ms = (time.time() - start) * 1000
+        start = time.time()
+        method = scope["method"]
+        path = scope["path"]
+        query = scope.get("query_string", b"").decode("utf-8", errors="replace")
 
-    ts = time.strftime("%Y-%m-%d %H:%M:%S")
-    path = request.url.path
-    if request.url.query:
-        path += f"?{request.url.query}"
+        # Capture request body for debug logging (POST/PUT/PATCH only).
+        body_bytes = b""
+        actual_receive = receive
+        if DEBUG and method in ("POST", "PUT", "PATCH"):
+            more_body = True
+            while more_body:
+                message = await receive()
+                body_bytes += message.get("body", b"")
+                more_body = message.get("more_body", False)
+            body_consumed = [False]
+            async def receive_wrapper():
+                if not body_consumed[0]:
+                    body_consumed[0] = True
+                    return {"type": "http.request", "body": body_bytes, "more_body": False}
+                return {"type": "http.request", "body": b"", "more_body": False}
+            actual_receive = receive_wrapper
 
-    line = f"{ts} {request.method} {path} {response.status_code} {duration_ms:.0f}ms"
-    if DEBUG and body_bytes:
-        preview = body_bytes[:500].decode("utf-8", errors="replace")
-        line += f" body={preview}"
-    print(line, flush=True)
+        # Wrap send to capture status code.
+        status_code = [0]
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start":
+                status_code[0] = message["status"]
+            await send(message)
 
-    return response
+        await self.app(scope, actual_receive, send_wrapper)
+
+        duration_ms = (time.time() - start) * 1000
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        full_path = path + (f"?{query}" if query else "")
+        line = f"{ts} {method} {full_path} {status_code[0]} {duration_ms:.0f}ms"
+        if DEBUG and body_bytes:
+            preview = body_bytes[:500].decode("utf-8", errors="replace")
+            line += f" body={preview}"
+        print(line, flush=True)
+
+
+app.add_middleware(AuthMiddleware)
+app.add_middleware(AccessLogMiddleware)
 
 
 # ─── Pydantic models ─────────────────────────────────────────────────────
@@ -586,7 +624,6 @@ def _scan_dir(base_path, recursive):
 
 @app.get("/api/fs/watch")
 async def fs_watch(
-    request: Request,
     path: str = Query(...),
     recursive: bool = Query(False),
     interval: int = Query(500),
@@ -610,8 +647,6 @@ async def fs_watch(
                     break
                 except asyncio.TimeoutError:
                     pass
-                if await request.is_disconnected():
-                    break
                 curr = await asyncio.to_thread(_scan_dir, path, recursive)
 
                 # Deleted
@@ -634,6 +669,8 @@ async def fs_watch(
 
                 prev = curr
         except asyncio.CancelledError:
+            raise
+        except (GeneratorExit, Exception):
             pass
 
     return StreamingResponse(generate(), media_type="text/event-stream")
@@ -1467,6 +1504,35 @@ async def fs_read(
             raise HTTPException(400, f"is a directory: {path}")
     await asyncio.to_thread(_check)
 
+    content_type, _ = mimetypes.guess_type(path)
+    headers = {}
+    if download:
+        headers["Content-Disposition"] = f'attachment; filename="{os.path.basename(path)}"'
+
+    # Non-regular files (devices, FIFOs, sockets) may block on f.read() after
+    # the first chunk. StreamingResponse runs the sync generator in a threadpool
+    # that can't be interrupted on client disconnect, leaving a stuck task.
+    # Read once and return a plain Response instead.
+    def _is_regular():
+        try:
+            st = os.stat(path)
+            return stat.S_ISREG(st.st_mode)
+        except OSError:
+            return False
+
+    if not await asyncio.to_thread(_is_regular):
+        def _read_once():
+            try:
+                fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+                try:
+                    return os.read(fd, CHUNK_SIZE)
+                finally:
+                    os.close(fd)
+            except OSError:
+                return b""
+        data = await asyncio.to_thread(_read_once)
+        return Response(content=data, media_type=content_type or "application/octet-stream", headers=headers)
+
     def _iter():
         with open(path, "rb") as f:
             while True:
@@ -1474,11 +1540,6 @@ async def fs_read(
                 if not chunk:
                     break
                 yield chunk
-
-    content_type, _ = mimetypes.guess_type(path)
-    headers = {}
-    if download:
-        headers["Content-Disposition"] = f'attachment; filename="{os.path.basename(path)}"'
 
     return StreamingResponse(
         _iter(),
@@ -1914,6 +1975,16 @@ def _batch_read_file(op: BatchOp) -> dict:
         return {"status": 400, "body": {"error": f"is a directory: {op.path}"}}
     if info.st_size > MAX_BATCH_READ_FILE:
         return {"status": 413, "body": {"error": f"file too large for batch: max {MAX_BATCH_READ_FILE} bytes"}}
+    if not stat.S_ISREG(info.st_mode):
+        try:
+            fd = os.open(op.path, os.O_RDONLY | os.O_NONBLOCK)
+            try:
+                data = os.read(fd, MAX_BATCH_READ_FILE)
+            finally:
+                os.close(fd)
+        except OSError:
+            data = b""
+        return {"status": 200, "body": base64.b64encode(data).decode("ascii")}
     with open(op.path, "rb") as f:
         data = f.read()
     return {"status": 200, "body": base64.b64encode(data).decode("ascii")}
@@ -2068,7 +2139,8 @@ if __name__ == "__main__":
         sock.listen(128)
         socks = [sock]
 
-    config = uvicorn.Config(app, host=HOST, port=PORT, log_level="info", access_log=False)
+    config = uvicorn.Config(app, host=HOST, port=PORT, log_level="info", access_log=False,
+                            timeout_graceful_shutdown=5)
     try:
         uvicorn.Server(config).run(sockets=socks)
     except KeyboardInterrupt:
