@@ -39,12 +39,33 @@ ENABLE_CORS = os.environ.get("REMOTE_OPS_CORS", "false").lower() == "true"
 WS_MAX_CONN = int(os.environ.get("REMOTE_OPS_WS_MAX_CONN", "64"))  # concurrent WS exec sessions
 DEBUG = os.environ.get("REMOTE_OPS_DEBUG", "false").lower() == "true"
 
+_shutdown_event = asyncio.Event()
+_main_loop = None
+
 
 # Lifespan: starts the fd-table and process-table background sweepers on
 # startup, cancels them on shutdown. Replaces the deprecated @app.on_event
 # ("startup") handlers.
 @contextlib.asynccontextmanager
 async def lifespan(app):
+    global _main_loop
+    _main_loop = asyncio.get_event_loop()
+
+    # Install signal handlers that set _shutdown_event before uvicorn's
+    # background-task wait. This lets watch generators exit immediately on
+    # ^C instead of hanging "Waiting for background tasks to complete".
+    _orig_int = signal_module.getsignal(signal_module.SIGINT)
+    _orig_term = signal_module.getsignal(signal_module.SIGTERM)
+
+    def _on_signal(signum, frame):
+        _main_loop.call_soon_threadsafe(_shutdown_event.set)
+        orig = _orig_int if signum == signal_module.SIGINT else _orig_term
+        if callable(orig):
+            orig(signum, frame)
+
+    signal_module.signal(signal_module.SIGINT, _on_signal)
+    signal_module.signal(signal_module.SIGTERM, _on_signal)
+
     fd_task = asyncio.create_task(_fd_sweeper())
     proc_task = asyncio.create_task(_proc_sweeper())
     try:
@@ -583,8 +604,12 @@ async def fs_watch(
     async def generate():
         prev = await asyncio.to_thread(_scan_dir, path, recursive)
         try:
-            while True:
-                await asyncio.sleep(interval / 1000.0)
+            while not _shutdown_event.is_set():
+                try:
+                    await asyncio.wait_for(_shutdown_event.wait(), timeout=interval / 1000.0)
+                    break
+                except asyncio.TimeoutError:
+                    pass
                 if await request.is_disconnected():
                     break
                 curr = await asyncio.to_thread(_scan_dir, path, recursive)
