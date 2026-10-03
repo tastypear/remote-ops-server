@@ -39,8 +39,6 @@ ENABLE_CORS = os.environ.get("REMOTE_OPS_CORS", "false").lower() == "true"
 WS_MAX_CONN = int(os.environ.get("REMOTE_OPS_WS_MAX_CONN", "64"))  # concurrent WS exec sessions
 DEBUG = os.environ.get("REMOTE_OPS_DEBUG", "false").lower() == "true"
 
-_shutdown_event = asyncio.Event()
-
 
 # Lifespan: starts the fd-table and process-table background sweepers on
 # startup, cancels them on shutdown. Replaces the deprecated @app.on_event
@@ -52,7 +50,6 @@ async def lifespan(app):
     try:
         yield
     finally:
-        _shutdown_event.set()
         fd_task.cancel()
         proc_task.cancel()
         # Kill all tracked processes on shutdown — the server is going away
@@ -568,6 +565,7 @@ def _scan_dir(base_path, recursive):
 
 @app.get("/api/fs/watch")
 async def fs_watch(
+    request: Request,
     path: str = Query(...),
     recursive: bool = Query(False),
     interval: int = Query(500),
@@ -585,9 +583,9 @@ async def fs_watch(
     async def generate():
         prev = await asyncio.to_thread(_scan_dir, path, recursive)
         try:
-            while not _shutdown_event.is_set():
+            while True:
                 await asyncio.sleep(interval / 1000.0)
-                if _shutdown_event.is_set():
+                if await request.is_disconnected():
                     break
                 curr = await asyncio.to_thread(_scan_dir, path, recursive)
 
