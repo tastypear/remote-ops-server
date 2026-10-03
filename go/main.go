@@ -153,6 +153,7 @@ func registerRoutes(mux *http.ServeMux) {
 
 	// exec
 	mux.HandleFunc("POST /api/exec", execSync)
+	mux.HandleFunc("POST /api/exec/batch", execBatch)
 	mux.HandleFunc("POST /api/exec/stream", execStream)
 	mux.HandleFunc("POST /api/exec/kill", execKill)
 	mux.HandleFunc("GET /api/exec/status", execStatus)

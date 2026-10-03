@@ -145,6 +145,14 @@ class StdinRequest(BaseModel):
     close: bool = True                  # close stdin after writing (攒-end semantics)
 
 
+class BatchExecRequest(BaseModel):
+    cmds: list[str]
+    mode: str = "sequential"            # "sequential" (shared shell) or "parallel" (independent)
+    cwd: str = "/"
+    env: dict[str, str] = Field(default_factory=dict)
+    timeout: int = 0                    # per-batch (sequential) or per-cmd (parallel), seconds
+
+
 # Env keys never inherited from the server's own environment — prevents
 # REMOTE_OPS_TOKEN and other secrets from leaking into child processes.
 _SENSITIVE_ENV = ("TOKEN", "SECRET", "KEY", "PASSWORD", "CREDENTIAL", "AUTH")
@@ -609,7 +617,7 @@ async def root():
         "name": "remote-ops-server",
         "version": "0.1.0",
         "endpoints": {
-            "exec": ["POST /api/exec", "POST /api/exec/stream", "POST /api/exec/kill", "GET /api/exec/status", "POST /api/exec/stdin", "WS /ws/exec"],
+            "exec": ["POST /api/exec", "POST /api/exec/batch", "POST /api/exec/stream", "POST /api/exec/kill", "GET /api/exec/status", "POST /api/exec/stdin", "WS /ws/exec"],
             "fs": [
                 "GET /api/fs/stat", "GET /api/fs/read", "PUT /api/fs/write",
                 "POST /api/fs/delete", "POST /api/fs/mkdir", "POST /api/fs/move",
@@ -794,6 +802,55 @@ async def exec_command(req: ExecRequest):
         resp["stdout_b64"] = base64.b64encode(stdout_b).decode("ascii")
         resp["stderr_b64"] = base64.b64encode(stderr_b).decode("ascii")
     return resp
+
+
+async def _exec_one(cmd: str, cwd: str, env: dict, timeout: int) -> dict:
+    start = time.monotonic()
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=_safe_cwd(cwd),
+            env=_build_env(env),
+            start_new_session=True,
+        )
+    except Exception as e:
+        return {"stdout": "", "stderr": str(e), "exit_code": -1,
+                "duration_ms": int((time.monotonic() - start) * 1000)}
+    try:
+        stdout_b, stderr_b = await asyncio.wait_for(
+            proc.communicate(),
+            timeout=timeout if timeout > 0 else None,
+        )
+    except asyncio.TimeoutError:
+        _kill_proc(proc)
+        await proc.wait()
+        return {"stdout": "", "stderr": "", "exit_code": -1,
+                "duration_ms": int((time.monotonic() - start) * 1000)}
+    return {
+        "stdout": stdout_b.decode(errors="replace"),
+        "stderr": stderr_b.decode(errors="replace"),
+        "exit_code": proc.returncode,
+        "duration_ms": int((time.monotonic() - start) * 1000),
+    }
+
+
+@app.post("/api/exec/batch")
+async def exec_batch(req: BatchExecRequest):
+    if len(req.cmds) == 0:
+        return {"results": []}
+    if len(req.cmds) > 64:
+        raise HTTPException(413, "batch too large: max 64 cmds")
+    if req.mode == "parallel":
+        results = await asyncio.gather(*[
+            _exec_one(cmd, req.cwd, req.env, req.timeout) for cmd in req.cmds
+        ])
+        return {"results": list(results)}
+    else:
+        joined = "\n".join(req.cmds)
+        result = await _exec_one(joined, req.cwd, req.env, req.timeout)
+        return {"results": [result]}
 
 
 @app.post("/api/exec/stream")
