@@ -232,6 +232,8 @@ class BatchOp(BaseModel):
     encoding: str = "text"
     dst: Optional[str] = None
     mode: Optional[str] = None
+    follow: bool = True
+    recursive: bool = False
 
 
 class BatchRequest(BaseModel):
@@ -1766,53 +1768,161 @@ async def fs_glob(
 
 
 # ─── Batch operations ───────────────────────────────────────────────────
+MAX_BATCH_OPS = 256
+MAX_BATCH_READ_FILE = 1 << 20  # 1 MB
+
+
+def _batch_err_result(exc: Exception) -> dict:
+    if isinstance(exc, FileNotFoundError):
+        return {"status": 404, "body": {"error": "not found"}}
+    if isinstance(exc, PermissionError):
+        return {"status": 403, "body": {"error": "permission denied"}}
+    return {"status": 400, "body": {"error": str(exc)}}
+
+
+def _batch_stat(op: BatchOp) -> dict:
+    if op.op == "lstat" or not op.follow:
+        st = os.lstat(op.path)
+    else:
+        st = os.stat(op.path)
+    return {"status": 200, "body": _stat_to_dict(st)}
+
+
+def _batch_readdir(op: BatchOp) -> dict:
+    info = os.stat(op.path)
+    if not stat.S_ISDIR(info.st_mode):
+        return {"status": 400, "body": {"error": f"not a directory: {op.path}"}}
+    entries = []
+    if op.recursive:
+        for root, dirs, files in os.walk(op.path):
+            dirs.sort()
+            files.sort()
+            for name in dirs + files:
+                full = os.path.join(root, name)
+                rel = os.path.relpath(full, op.path)
+                try:
+                    st = os.stat(full)
+                    t = "dir" if stat.S_ISDIR(st.st_mode) else "file"
+                    entries.append({"name": rel, "type": t, "size": st.st_size})
+                except OSError:
+                    entries.append({"name": rel, "type": "unknown"})
+    else:
+        for name in sorted(os.listdir(op.path)):
+            full = os.path.join(op.path, name)
+            try:
+                st = os.lstat(full)
+                if stat.S_ISDIR(st.st_mode):
+                    t = "dir"
+                elif stat.S_ISLNK(st.st_mode):
+                    t = "symlink"
+                else:
+                    t = "file"
+                entries.append({"name": name, "type": t, "size": st.st_size, "mode": oct(st.st_mode & 0o777)})
+            except OSError:
+                entries.append({"name": name, "type": "unknown"})
+    return {"status": 200, "body": entries}
+
+
+def _batch_read_file(op: BatchOp) -> dict:
+    info = os.stat(op.path)
+    if stat.S_ISDIR(info.st_mode):
+        return {"status": 400, "body": {"error": f"is a directory: {op.path}"}}
+    if info.st_size > MAX_BATCH_READ_FILE:
+        return {"status": 413, "body": {"error": f"file too large for batch: max {MAX_BATCH_READ_FILE} bytes"}}
+    with open(op.path, "rb") as f:
+        data = f.read()
+    return {"status": 200, "body": base64.b64encode(data).decode("ascii")}
+
+
+def _batch_access(op: BatchOp) -> dict:
+    os.lstat(op.path)  # raises FileNotFoundError if missing
+    mode_int = 0
+    if op.mode:
+        try:
+            mode_int = int(op.mode, 8)
+        except ValueError:
+            pass
+    if mode_int and not os.access(op.path, mode_int):
+        return {"status": 403, "body": {"error": f"access denied: {op.path}"}}
+    return {"status": 200, "body": None}
+
+
+def _batch_write(op: BatchOp) -> dict:
+    if op.encoding == "base64":
+        content = base64.b64decode(op.content)
+    else:
+        content = op.content.encode()
+    Path(op.path).parent.mkdir(parents=True, exist_ok=True)
+    with open(op.path, "wb") as f:
+        f.write(content)
+    if op.mode:
+        os.chmod(op.path, int(op.mode, 8))
+    return {"status": 200, "body": None}
+
+
+def _batch_delete(op: BatchOp) -> dict:
+    if os.path.isdir(op.path) and not os.path.islink(op.path):
+        shutil.rmtree(op.path)
+    else:
+        os.remove(op.path)
+    return {"status": 200, "body": None}
+
+
+def _batch_mkdir(op: BatchOp) -> dict:
+    os.makedirs(op.path, exist_ok=True)
+    if op.mode:
+        os.chmod(op.path, int(op.mode, 8))
+    return {"status": 200, "body": None}
+
+
+def _batch_move(op: BatchOp) -> dict:
+    try:
+        os.rename(op.path, op.dst)
+    except OSError:
+        shutil.move(op.path, op.dst)
+    return {"status": 200, "body": None}
+
+
+def _batch_copy(op: BatchOp) -> dict:
+    if os.path.isdir(op.path):
+        shutil.copytree(op.path, op.dst)
+    else:
+        shutil.copy2(op.path, op.dst)
+    return {"status": 200, "body": None}
+
+
+_BATCH_DISPATCH = {
+    "stat": _batch_stat,
+    "lstat": _batch_stat,
+    "readdir": _batch_readdir,
+    "readFile": _batch_read_file,
+    "access": _batch_access,
+    "write": _batch_write,
+    "delete": _batch_delete,
+    "mkdir": _batch_mkdir,
+    "move": _batch_move,
+    "copy": _batch_copy,
+}
+
+
 @app.post("/api/fs/batch")
 async def fs_batch(req: BatchRequest):
+    if len(req.ops) > MAX_BATCH_OPS:
+        raise HTTPException(413, f"batch too large: max {MAX_BATCH_OPS} ops")
+
     def _do():
         results = []
         for op in req.ops:
+            handler = _BATCH_DISPATCH.get(op.op)
+            if handler is None:
+                results.append({"status": 400, "body": {"error": f"unknown op: {op.op}"}})
+                continue
             try:
-                if op.op == "write":
-                    if op.encoding == "base64":
-                        content = base64.b64decode(op.content)
-                    else:
-                        content = op.content.encode()
-                    p = Path(op.path)
-                    p.parent.mkdir(parents=True, exist_ok=True)
-                    p.write_bytes(content)
-                    if op.mode:
-                        os.chmod(op.path, int(op.mode, 8))
-                    results.append({"op": op.op, "path": op.path, "ok": True})
-                elif op.op == "delete":
-                    if os.path.isdir(op.path) and not os.path.islink(op.path):
-                        shutil.rmtree(op.path)
-                    else:
-                        os.remove(op.path)
-                    results.append({"op": op.op, "path": op.path, "ok": True})
-                elif op.op == "mkdir":
-                    os.makedirs(op.path, exist_ok=True)
-                    if op.mode:
-                        os.chmod(op.path, int(op.mode, 8))
-                    results.append({"op": op.op, "path": op.path, "ok": True})
-                elif op.op == "move":
-                    shutil.move(op.path, op.dst)
-                    results.append({"op": op.op, "path": op.path, "ok": True})
-                elif op.op == "copy":
-                    if os.path.isdir(op.path):
-                        shutil.copytree(op.path, op.dst)
-                    else:
-                        shutil.copy2(op.path, op.dst)
-                    results.append({"op": op.op, "path": op.path, "ok": True})
-                else:
-                    results.append({
-                        "op": op.op, "path": op.path, "ok": False,
-                        "error": f"unknown op: {op.op}",
-                    })
+                results.append(handler(op))
             except Exception as e:
-                results.append({
-                    "op": op.op, "path": op.path, "ok": False, "error": str(e),
-                })
+                results.append(_batch_err_result(e))
         return results
+
     results = await asyncio.to_thread(_do)
     return {"results": results}
 

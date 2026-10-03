@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/base64"
 	"net/http"
 	"os"
 	"os/exec"
@@ -171,74 +170,6 @@ func globMatch(pattern, name string) bool {
 		}
 	}
 	return false
-}
-
-func fsBatch(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Ops []struct {
-			Op       string `json:"op"`
-			Path     string `json:"path"`
-			Dst      string `json:"dst"`
-			Content  string `json:"content"`
-			Encoding string `json:"encoding"`
-			Mode     string `json:"mode"`
-		} `json:"ops"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		writeJSON(w, 400, map[string]any{"error": err.Error()})
-		return
-	}
-	results := []map[string]any{}
-	for _, op := range req.Ops {
-		switch op.Op {
-		case "write":
-			var content []byte
-			if op.Encoding == "base64" {
-				content, _ = base64.StdEncoding.DecodeString(op.Content)
-			} else {
-				content = []byte(op.Content)
-			}
-			os.MkdirAll(filepath.Dir(op.Path), 0755)
-			if err := os.WriteFile(op.Path, content, 0644); err != nil {
-				results = append(results, map[string]any{"op": op.Op, "path": op.Path, "ok": false, "error": err.Error()})
-				continue
-			}
-			if op.Mode != "" {
-				m, mErr := parseOctal(op.Mode)
-				if mErr == nil {
-					os.Chmod(op.Path, m)
-				}
-			}
-			results = append(results, map[string]any{"op": op.Op, "path": op.Path, "ok": true})
-		case "delete":
-			os.RemoveAll(op.Path)
-			results = append(results, map[string]any{"op": op.Op, "path": op.Path, "ok": true})
-		case "mkdir":
-			os.MkdirAll(op.Path, 0755)
-			if op.Mode != "" {
-				m, mErr := parseOctal(op.Mode)
-				if mErr == nil {
-					os.Chmod(op.Path, m)
-				}
-			}
-			results = append(results, map[string]any{"op": op.Op, "path": op.Path, "ok": true})
-		case "move":
-			if err := os.Rename(op.Path, op.Dst); err != nil {
-				results = append(results, map[string]any{"op": op.Op, "path": op.Path, "ok": false, "error": err.Error()})
-			} else {
-				results = append(results, map[string]any{"op": op.Op, "path": op.Path, "ok": true})
-			}
-		case "copy":
-			if err := copyAll(op.Path, op.Dst); err != nil {
-				results = append(results, map[string]any{"op": op.Op, "path": op.Path, "ok": false, "error": err.Error()})
-			} else {
-				results = append(results, map[string]any{"op": op.Op, "path": op.Path, "ok": true})
-			}
-		default:
-			results = append(results, map[string]any{"op": op.Op, "path": op.Path, "ok": false, "error": "unknown op: " + op.Op})
-		}
-	}
-	writeJSON(w, 200, map[string]any{"results": results})
 }
 
 func fsPatch(w http.ResponseWriter, r *http.Request) {
