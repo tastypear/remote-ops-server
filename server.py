@@ -2044,4 +2044,7 @@ if __name__ == "__main__":
         socks = [sock]
 
     config = uvicorn.Config(app, host=HOST, port=PORT, log_level="info", access_log=False)
-    uvicorn.Server(config).run(sockets=socks)
+    try:
+        uvicorn.Server(config).run(sockets=socks)
+    except KeyboardInterrupt:
+        pass
