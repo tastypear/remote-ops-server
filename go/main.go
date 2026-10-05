@@ -108,7 +108,7 @@ func main() {
 	handler = authMiddleware(handler)
 	handler = accessLogMiddleware(handler)
 
-	srv := &http.Server{Handler: handler}
+	srv := &http.Server{Handler: handler, IdleTimeout: 5 * time.Second}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
