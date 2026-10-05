@@ -35,6 +35,12 @@ func fdOpen(w http.ResponseWriter, r *http.Request) {
 		req.Mode = 0666
 	}
 	flag := req.Flags | syscall.O_CLOEXEC
+	// Non-regular files (devices, FIFOs, sockets) must use O_NONBLOCK to avoid
+	// blocking reads (e.g., /dev/tty blocks forever waiting for keyboard input),
+	// which would stall the sync-bridge worker and prevent all subsequent requests.
+	if info, err := os.Stat(req.Path); err == nil && !info.Mode().IsRegular() {
+		flag |= syscall.O_NONBLOCK
+	}
 	// Auto-create parent dirs when creating a file (matches /api/fs/write behavior).
 	if req.Flags&syscall.O_CREAT != 0 {
 		if parent := path.Dir(req.Path); parent != "" && parent != "." {
