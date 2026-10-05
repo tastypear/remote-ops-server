@@ -163,6 +163,17 @@ func batchReadFile(op batchOp) map[string]any {
 	if info.Size() > maxBatchReadFile {
 		return map[string]any{"status": 413, "body": map[string]any{"error": fmt.Sprintf("file too large for batch: max %d bytes", maxBatchReadFile)}}
 	}
+	if !info.Mode().IsRegular() {
+		// Non-regular file (device, FIFO, socket) — O_NONBLOCK to avoid blocking.
+		f, err := os.OpenFile(op.Path, syscall.O_RDONLY|syscall.O_NONBLOCK, 0)
+		if err != nil {
+			return batchErrResult(err)
+		}
+		defer f.Close()
+		buf := make([]byte, maxBatchReadFile)
+		n, _ := f.Read(buf)
+		return map[string]any{"status": 200, "body": base64.StdEncoding.EncodeToString(buf[:n])}
+	}
 	data, err := os.ReadFile(op.Path)
 	if err != nil {
 		return batchErrResult(err)

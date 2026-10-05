@@ -86,6 +86,23 @@ func fsRead(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": "is a directory: " + path})
 		return
 	}
+	if !info.Mode().IsRegular() {
+		// Non-regular file (device, FIFO, socket) — open with O_NONBLOCK to avoid
+		// blocking on read() (e.g., /dev/tty blocks forever waiting for keyboard input).
+		f, err := os.OpenFile(path, syscall.O_RDONLY|syscall.O_NONBLOCK, 0)
+		if err != nil {
+			fsError(w, err)
+			return
+		}
+		defer f.Close()
+		w.Header().Set("Content-Type", "application/octet-stream")
+		buf := make([]byte, 65536)
+		n, _ := f.Read(buf)
+		if n > 0 {
+			w.Write(buf[:n])
+		}
+		return
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		fsError(w, err)
