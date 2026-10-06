@@ -87,17 +87,19 @@ func fsRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !info.Mode().IsRegular() {
-		// Non-regular file (device, FIFO, socket) — open with O_NONBLOCK to avoid
-		// blocking on read() (e.g., /dev/tty blocks forever waiting for keyboard input).
-		f, err := os.OpenFile(path, syscall.O_RDONLY|syscall.O_NONBLOCK, 0)
+		// Non-regular file (device, FIFO, socket) — open with O_NONBLOCK and use
+		// syscall.Read (raw) to avoid blocking. os.File.Read uses the poll package
+		// which waits on epoll for EAGAIN, effectively blocking. syscall.Read does
+		// a raw read() that returns EAGAIN immediately.
+		fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NONBLOCK, 0)
 		if err != nil {
 			fsError(w, err)
 			return
 		}
-		defer f.Close()
+		defer syscall.Close(fd)
 		w.Header().Set("Content-Type", "application/octet-stream")
 		buf := make([]byte, 65536)
-		n, _ := f.Read(buf)
+		n, _ := syscall.Read(fd, buf)
 		if n > 0 {
 			w.Write(buf[:n])
 		}

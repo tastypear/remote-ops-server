@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -109,6 +110,11 @@ func main() {
 	handler = accessLogMiddleware(handler)
 
 	srv := &http.Server{Handler: handler, IdleTimeout: 5 * time.Second}
+	if debugMode {
+		srv.ConnState = func(conn net.Conn, state http.ConnState) {
+			log.Printf("CONN %s %s", state, conn.RemoteAddr())
+		}
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -127,6 +133,9 @@ func main() {
 
 	<-ctx.Done()
 	log.Println("shutting down...")
+	if debugMode {
+		log.Printf("goroutines at shutdown: %d", runtime.NumGoroutine())
+	}
 
 	// Kill all tracked processes.
 	procTable.Lock()
@@ -146,7 +155,13 @@ func main() {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	if debugMode {
+		log.Println("calling srv.Shutdown...")
+	}
 	srv.Shutdown(shutdownCtx)
+	if debugMode {
+		log.Println("shutdown complete, goroutines:", runtime.NumGoroutine())
+	}
 }
 
 func registerRoutes(mux *http.ServeMux) {
@@ -281,6 +296,9 @@ func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 func accessLogMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		if debugMode {
+			log.Printf("REQ  %s %s from %s", r.Method, r.URL.RequestURI(), r.RemoteAddr)
+		}
 
 		var bodyBytes []byte
 		if debugMode && (r.Method == "POST" || r.Method == "PUT" || r.Method == "PATCH") {
