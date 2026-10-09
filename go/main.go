@@ -296,8 +296,15 @@ func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 func accessLogMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		// Use client-provided X-Req-ID for cross-log correlation, or generate one
+		// if the client didn't send one (e.g. curl, other clients).
+		reqID := r.Header.Get("X-Req-ID")
+		if reqID == "" {
+			reqID = fmt.Sprintf("%08x", time.Now().UnixNano()&0xFFFFFFFF)
+		}
+		w.Header().Set("X-Req-ID", reqID)
 		if debugMode {
-			log.Printf("REQ  %s %s from %s", r.Method, r.URL.RequestURI(), r.RemoteAddr)
+			log.Printf("REQ  %s %s from %s id=%s", r.Method, r.URL.RequestURI(), r.RemoteAddr, reqID)
 		}
 
 		var bodyBytes []byte
@@ -315,13 +322,9 @@ func accessLogMiddleware(next http.Handler) http.Handler {
 			path += "?" + r.URL.RawQuery
 		}
 		if debugMode && len(bodyBytes) > 0 {
-			preview := string(bodyBytes)
-			if len(preview) > 500 {
-				preview = preview[:500]
-			}
-			log.Printf("%s %s %d %dms body=%s", r.Method, path, wrapped.status, duration.Milliseconds(), preview)
+			log.Printf("%s %s %d %dms id=%s req=%s", r.Method, path, wrapped.status, duration.Milliseconds(), reqID, string(bodyBytes))
 		} else {
-			log.Printf("%s %s %d %dms", r.Method, path, wrapped.status, duration.Milliseconds())
+			log.Printf("%s %s %d %dms id=%s", r.Method, path, wrapped.status, duration.Milliseconds(), reqID)
 		}
 	})
 }
